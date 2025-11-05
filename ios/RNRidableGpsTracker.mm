@@ -1,6 +1,6 @@
 #import "RNRidableGpsTracker.h"
-#import <React/RCTBridgeModule.h>
-#import <React/RCTEventEmitter.h>
+#import <React/RCTBridge.h>
+#import <React/RCTEventDispatcher.h>
 #import <CoreLocation/CoreLocation.h>
 
 #ifdef RCT_NEW_ARCH_ENABLED
@@ -17,11 +17,14 @@
 @property (nonatomic, strong) NSTimer *updateTimer;
 @property (nonatomic, strong) CLLocation *lastLocation;
 @property (nonatomic, assign) BOOL useTimerMode;
+@property (nonatomic, weak) RCTBridge *bridge;
 @end
 
 @implementation RNRidableGpsTracker
 
 RCT_EXPORT_MODULE(RNRidableGpsTracker)
+
+@synthesize bridge = _bridge;
 
 + (BOOL)requiresMainQueueSetup {
     return YES;
@@ -36,7 +39,7 @@ RCT_EXPORT_MODULE(RNRidableGpsTracker)
         _useTimerMode = YES;
         _config = [NSMutableDictionary dictionary];
         
-        // Default configuration - Optimized for cycling GPS tracking
+        // Default configuration
         _config[@"distanceFilter"] = @(-1);
         _config[@"desiredAccuracy"] = @"high";
         _config[@"activityType"] = @"otherNavigation";
@@ -45,7 +48,7 @@ RCT_EXPORT_MODULE(RNRidableGpsTracker)
         _config[@"pausesLocationUpdatesAutomatically"] = @NO;
         _config[@"interval"] = @1000;
         
-        // Apply default settings immediately
+        // Apply default settings
         _locationManager.desiredAccuracy = kCLLocationAccuracyBest;
         _locationManager.distanceFilter = kCLDistanceFilterNone;
         _locationManager.activityType = CLActivityTypeOtherNavigation;
@@ -76,6 +79,13 @@ RCT_EXPORT_METHOD(addListener:(NSString *)eventName) {
 
 RCT_EXPORT_METHOD(removeListeners:(double)count) {
     // Remove listeners
+}
+
+// Send event using RCTEventEmitter
+- (void)sendEventWithName:(NSString *)eventName body:(id)body {
+    if (self.bridge) {
+        [self.bridge.eventDispatcher sendDeviceEventWithName:eventName body:body];
+    }
 }
 
 #pragma mark - Public Methods
