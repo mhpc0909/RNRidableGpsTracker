@@ -24,6 +24,7 @@ android-example/.gradle/
 android-example/build/
 android-example/app/build/
 android-example/local.properties
+**/cache.properties
 *.iml
 *.apk
 *.aab
@@ -50,3 +51,4 @@ android-example/local.properties
 
 # Misc
 *.log
+

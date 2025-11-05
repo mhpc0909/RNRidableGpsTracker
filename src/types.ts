@@ -8,11 +8,11 @@ export interface LocationData {
   timestamp: number;
 }
 
-export interface GpsConfig {
+export interface LocationConfig {
   // Distance filter in meters
-  distanceFilter: number;
-  // Desired accuracy in meters
-  desiredAccuracy: 'high' | 'medium' | 'low';
+  distanceFilter?: number;
+  // Desired accuracy
+  desiredAccuracy?: 'high' | 'medium' | 'low';
   // Update interval in milliseconds (Android)
   interval?: number;
   // Fastest update interval in milliseconds (Android)
@@ -27,11 +27,13 @@ export interface GpsConfig {
   pausesLocationUpdatesAutomatically?: boolean;
 }
 
-export interface GpsStatus {
+export interface LocationStatus {
   isRunning: boolean;
   isAuthorized: boolean;
   authorizationStatus: 'notDetermined' | 'restricted' | 'denied' | 'authorizedAlways' | 'authorizedWhenInUse';
 }
+
+export type LocationEventCallback = (location: LocationData) => void;
 
 export enum LocationEvent {
   LOCATION = 'location',

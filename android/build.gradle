@@ -17,6 +17,15 @@ buildscript {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
+// React Native Codegen for New Architecture
+def isNewArchitectureEnabled() {
+  return project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
+}
+
+if (isNewArchitectureEnabled()) {
+  apply plugin: "com.facebook.react"
+}
+
 android {
   namespace "com.rnridablegpstracker"
   compileSdkVersion safeExtGet('compileSdkVersion', 34)
@@ -48,8 +57,21 @@ android {
   }
 }
 
+repositories {
+  mavenCentral()
+  google()
+}
+
 dependencies {
   implementation 'com.facebook.react:react-android'
   implementation "org.jetbrains.kotlin:kotlin-stdlib:${safeExtGet('kotlinVersion', '1.8.0')}"
   implementation "com.google.android.gms:play-services-location:21.3.0"
+}
+
+// React Native Codegen configuration
+if (isNewArchitectureEnabled()) {
+  react {
+    libraryName = "RNRidableGpsTracker"
+    codegenJavaPackageName = "com.rnridablegpstracker"
+  }
 }
