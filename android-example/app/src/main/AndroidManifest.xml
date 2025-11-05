@@ -26,9 +26,9 @@
             </intent-filter>
         </activity>
         
-        <!-- LocationService from the library package -->
+        <!-- LocationService from the example app -->
         <service
-            android:name="com.rnridablegpstracker.LocationService"
+            android:name=".LocationService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="location" />

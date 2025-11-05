@@ -10,6 +10,7 @@ import android.location.Location
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import android.widget.Button
 import android.widget.ScrollView
 import android.widget.TextView
@@ -38,8 +39,13 @@ class MainActivity : AppCompatActivity() {
     private var locationService: LocationService? = null
     private var isServiceBound = false
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            Log.d(TAG, "Service connected")
             val binder = service as LocationService.LocalBinder
             locationService = binder.getService()
             isServiceBound = true
@@ -54,6 +60,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            Log.d(TAG, "Service disconnected")
             locationService = null
             isServiceBound = false
         }
@@ -176,6 +183,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startTracking() {
+        Log.d(TAG, "startTracking called")
+        
         if (!checkPermissions()) {
             Toast.makeText(this, "위치 권한이 필요합니다", Toast.LENGTH_SHORT).show()
             return
@@ -189,8 +198,10 @@ class MainActivity : AppCompatActivity() {
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(serviceIntent)
+                Log.d(TAG, "startForegroundService called")
             } else {
                 startService(serviceIntent)
+                Log.d(TAG, "startService called")
             }
 
             // 서비스가 바인드되어 있으면 위치 리스너 설정
@@ -202,22 +213,33 @@ class MainActivity : AppCompatActivity() {
                         addToHistory(location)
                     }
                 }
+                Log.d(TAG, "Location listener set")
             }
 
             isTracking = true
             updateStatus()
-            Toast.makeText(this, "GPS 트래킹 시작 (포그라운드 서비스)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "GPS 트래킹 시작", Toast.LENGTH_SHORT).show()
         } catch (e: SecurityException) {
+            Log.e(TAG, "Security exception", e)
             Toast.makeText(this, "권한 오류: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun stopTracking() {
-        // 포그라운드 서비스 중지
+        Log.d(TAG, "stopTracking called")
+        
+        // 바인드된 서비스를 통해 직접 중지
+        if (isServiceBound && locationService != null) {
+            Log.d(TAG, "Calling stopForegroundTracking on bound service")
+            locationService?.stopForegroundTracking()
+        }
+        
+        // 서비스 중지 Intent 전송 (추가 안전장치)
         val serviceIntent = Intent(this, LocationService::class.java).apply {
             action = LocationService.ACTION_STOP
         }
         stopService(serviceIntent)
+        Log.d(TAG, "stopService intent sent")
         
         // 기존 위치 업데이트도 제거 (안전을 위해)
         locationCallback?.let {
@@ -227,6 +249,7 @@ class MainActivity : AppCompatActivity() {
         isTracking = false
         updateStatus()
         Toast.makeText(this, "GPS 트래킹 중지", Toast.LENGTH_SHORT).show()
+        Log.d(TAG, "stopTracking completed")
     }
 
     private fun getCurrentLocation() {

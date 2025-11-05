@@ -7,6 +7,10 @@
 #import <React/RCTEventEmitter.h>
 
 @interface RNRidableGpsTracker : RCTEventEmitter <RCTBridgeModule>
+
+// Declare event emitter method
+- (void)sendEventWithName:(nullable NSString *)eventName body:(nullable id)body;
+
 #endif
 
 @end

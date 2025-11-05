@@ -1,4 +1,6 @@
 #import "RNRidableGpsTracker.h"
+#import <React/RCTBridgeModule.h>
+#import <React/RCTEventEmitter.h>
 #import <CoreLocation/CoreLocation.h>
 
 #ifdef RCT_NEW_ARCH_ENABLED
@@ -31,17 +33,17 @@ RCT_EXPORT_MODULE(RNRidableGpsTracker)
         _locationManager.delegate = self;
         _isTracking = NO;
         _hasListeners = NO;
-        _useTimerMode = YES; // Enable 1-second timer mode by default
+        _useTimerMode = YES;
         _config = [NSMutableDictionary dictionary];
         
         // Default configuration - Optimized for cycling GPS tracking
-        _config[@"distanceFilter"] = @(-1); // kCLDistanceFilterNone for continuous updates
+        _config[@"distanceFilter"] = @(-1);
         _config[@"desiredAccuracy"] = @"high";
-        _config[@"activityType"] = @"otherNavigation"; // Changed from fitness for better GPS tracking
+        _config[@"activityType"] = @"otherNavigation";
         _config[@"allowsBackgroundLocationUpdates"] = @YES;
         _config[@"showsBackgroundLocationIndicator"] = @YES;
-        _config[@"pausesLocationUpdatesAutomatically"] = @NO; // Never pause for cycling
-        _config[@"interval"] = @1000; // 1 second interval in milliseconds
+        _config[@"pausesLocationUpdatesAutomatically"] = @NO;
+        _config[@"interval"] = @1000;
         
         // Apply default settings immediately
         _locationManager.desiredAccuracy = kCLLocationAccuracyBest;
@@ -60,7 +62,6 @@ RCT_EXPORT_MODULE(RNRidableGpsTracker)
     return @[@"location", @"error", @"authorizationChanged"];
 }
 
-// Tell RN when listeners are added/removed
 - (void)startObserving {
     _hasListeners = YES;
 }
@@ -69,14 +70,12 @@ RCT_EXPORT_MODULE(RNRidableGpsTracker)
     _hasListeners = NO;
 }
 
-- (void)addListener:(NSString *)eventName {
-    // Override from RCTEventEmitter
-    [super addListener:eventName];
+RCT_EXPORT_METHOD(addListener:(NSString *)eventName) {
+    // Keep track of listeners
 }
 
-- (void)removeListeners:(double)count {
-    // Override from RCTEventEmitter
-    [super removeListeners:count];
+RCT_EXPORT_METHOD(removeListeners:(double)count) {
+    // Remove listeners
 }
 
 #pragma mark - Public Methods
@@ -87,7 +86,6 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
     @try {
         [self.config addEntriesFromDictionary:config];
         
-        // Apply configuration
         NSNumber *distanceFilter = config[@"distanceFilter"] ?: self.config[@"distanceFilter"];
         double filterValue = [distanceFilter doubleValue];
         self.locationManager.distanceFilter = filterValue < 0 ? kCLDistanceFilterNone : filterValue;
@@ -146,7 +144,6 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
     if (status == kCLAuthorizationStatusAuthorizedAlways ||
         status == kCLAuthorizationStatusAuthorizedWhenInUse) {
         
-        // Ensure optimal settings are applied before starting
         self.locationManager.pausesLocationUpdatesAutomatically = NO;
         self.locationManager.allowsBackgroundLocationUpdates = YES;
         if (@available(iOS 11.0, *)) {
@@ -156,7 +153,6 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
         [self.locationManager startUpdatingLocation];
         self.isTracking = YES;
         
-        // Start timer for 1-second interval updates
         if (self.useTimerMode) {
             NSNumber *intervalMs = self.config[@"interval"] ?: @1000;
             NSTimeInterval interval = [intervalMs doubleValue] / 1000.0;
@@ -166,7 +162,6 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
                                                               selector:@selector(sendTimedLocationUpdate)
                                                               userInfo:nil
                                                                repeats:YES];
-            // Ensure timer runs in all modes (including when scrolling)
             [[NSRunLoop mainRunLoop] addTimer:self.updateTimer forMode:NSRunLoopCommonModes];
         }
         
@@ -185,7 +180,6 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
     
     [self.locationManager stopUpdatingLocation];
     
-    // Stop timer
     if (self.updateTimer) {
         [self.updateTimer invalidate];
         self.updateTimer = nil;
@@ -230,7 +224,6 @@ RCT_EXPORT_METHOD(requestPermissions:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject) {
     [self.locationManager requestAlwaysAuthorization];
     
-    // Wait a bit for user response
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         CLAuthorizationStatus status;
         if (@available(iOS 14.0, *)) {
@@ -268,7 +261,6 @@ RCT_EXPORT_METHOD(openLocationSettings) {
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
     CLLocation *location = [locations lastObject];
     
-    // Always update last location
     self.lastLocation = location;
     
     if (self.currentLocationResolve) {
@@ -278,12 +270,10 @@ RCT_EXPORT_METHOD(openLocationSettings) {
         self.currentLocationReject = nil;
     }
     
-    // If not using timer mode, send immediately
     if (self.isTracking && self.hasListeners && !self.useTimerMode) {
         NSDictionary *locationDict = [self locationToDictionary:location];
         [self sendEventWithName:@"location" body:locationDict];
     }
-    // If using timer mode, the timer will send updates at regular intervals
 }
 
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {

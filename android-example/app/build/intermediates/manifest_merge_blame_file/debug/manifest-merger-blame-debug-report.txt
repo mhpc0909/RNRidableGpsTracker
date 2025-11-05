@@ -76,11 +76,11 @@
 42            </intent-filter>
 43        </activity>
 44
-45        <!-- LocationService from the library package -->
+45        <!-- LocationService from the example app -->
 46        <service
 46-->/Users/mike/source/KoraProject/NativeModules/RNRidableGpsTracker/android-example/app/src/main/AndroidManifest.xml:30:9-34:56
-47            android:name="com.rnridablegpstracker.LocationService"
-47-->/Users/mike/source/KoraProject/NativeModules/RNRidableGpsTracker/android-example/app/src/main/AndroidManifest.xml:31:13-67
+47            android:name="com.gpstrackerexample.LocationService"
+47-->/Users/mike/source/KoraProject/NativeModules/RNRidableGpsTracker/android-example/app/src/main/AndroidManifest.xml:31:13-44
 48            android:enabled="true"
 48-->/Users/mike/source/KoraProject/NativeModules/RNRidableGpsTracker/android-example/app/src/main/AndroidManifest.xml:32:13-35
 49            android:exported="false"
