@@ -36,9 +36,20 @@
     "src",
     "ios",
     "android",
-    "RNRidableGpsTracker.podspec",
+    "react-native-ridable-gps-tracker.podspec",
     "README.md"
   ],
+  "codegenConfig": {
+    "name": "RNRidableGpsTrackerSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.rnridablegpstracker"
+    },
+    "ios": {
+      "moduleName": "RNRidableGpsTracker"
+    }
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/yourusername/RNRidable-gps-tracker.git"

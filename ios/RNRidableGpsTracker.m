@@ -2,10 +2,7 @@
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
 
-#ifdef RCT_NEW_ARCH_ENABLED
-#import "RNRidableGpsTrackerSpec.h"
-#endif
-
+// Spec import를 완전히 제거하고 Old Architecture 방식으로 진행
 @interface RCT_EXTERN_MODULE(RNRidableGpsTracker, RCTEventEmitter)
 
 RCT_EXTERN_METHOD(configure:(NSDictionary *)config

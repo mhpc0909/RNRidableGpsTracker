@@ -15,21 +15,14 @@ Pod::Spec.new do |s|
 
   s.source_files = "ios/**/*.{h,m,mm,swift}"
   
-  # New Architecture support
+  # Swift 설정
   s.pod_target_xcconfig = {
     "DEFINES_MODULE" => "YES",
     "SWIFT_OBJC_INTERFACE_HEADER_NAME" => "RNRidableGpsTracker-Swift.h"
   }
 
-  s.dependency "React-Core"
+  # 🔥 이게 핵심! New Architecture 자동 설정
+  install_modules_dependencies(s)
   
-  # Conditionally include Codegen specs for New Architecture
-  if ENV['RCT_NEW_ARCH_ENABLED'] == '1' then
-    s.compiler_flags = "-DRCT_NEW_ARCH_ENABLED=1"
-    s.pod_target_xcconfig = {
-      "HEADER_SEARCH_PATHS" => "\"$(PODS_ROOT)/boost\"",
-      "OTHER_CPLUSPLUSFLAGS" => "-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1",
-      "CLANG_CXX_LANGUAGE_STANDARD" => "c++17"
-    }
-  end
+  s.dependency "React-Core"
 end

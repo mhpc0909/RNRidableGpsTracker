@@ -1,24 +1,13 @@
-import { NativeEventEmitter, Platform } from 'react-native'
-import NativeRidableGpsTracker from './NativeRidableGpsTracker'
-import type {
-  LocationConfig,
-  LocationData,
-  LocationStatus,
-  LocationEventCallback,
-} from './types'
+import { NativeEventEmitter, Platform } from "react-native"
+import NativeRidableGpsTracker from "./NativeRidableGpsTracker"
+import type { LocationConfig, LocationData, LocationStatus, LocationEventCallback } from "./types"
 
-const LINKING_ERROR =
-  `The package 'react-native-ridable-gps-tracker' doesn't seem to be linked. Make sure: \n\n` +
-  Platform.select({ ios: "- Run 'pod install'\n", default: '' }) +
-  '- Rebuild the app after installing the package\n' +
-  '- If using New Architecture, ensure Codegen has run\n'
+const LINKING_ERROR = `The package 'react-native-ridable-gps-tracker' doesn't seem to be linked. Make sure: \n\n` + Platform.select({ ios: "- Run 'pod install'\n", default: "" }) + "- Rebuild the app after installing the package\n" + "- If using New Architecture, ensure Codegen has run\n"
 
 // @ts-expect-error - NativeModule can be null
 const isTurboModuleEnabled = global.__turboModuleProxy != null
 
-const RidableGpsTrackerModule = isTurboModuleEnabled
-  ? NativeRidableGpsTracker
-  : require('./NativeRidableGpsTracker').default
+const RidableGpsTrackerModule = isTurboModuleEnabled ? NativeRidableGpsTracker : require("./NativeRidableGpsTracker").default
 
 if (!RidableGpsTrackerModule) {
   throw new Error(LINKING_ERROR)
@@ -59,9 +48,9 @@ class RidableGpsTracker {
   }
 
   addLocationListener(callback: LocationEventCallback): () => void {
-    this.locationListener = eventEmitter.addListener('location', callback)
-    RidableGpsTrackerModule.addListener('location')
-    
+    this.locationListener = eventEmitter.addListener("location", callback)
+    RidableGpsTrackerModule.addListener("location")
+
     return () => {
       this.removeLocationListener()
     }
@@ -77,4 +66,4 @@ class RidableGpsTracker {
 }
 
 export default new RidableGpsTracker()
-export * from './types'
+export * from "./types"
