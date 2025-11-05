@@ -9,8 +9,8 @@ buildscript {
   }
 
   dependencies {
-    classpath("com.android.tools.build:gradle")
-    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    classpath("com.android.tools.build:gradle:8.1.0")
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${safeExtGet('kotlinVersion', '1.8.0')}")
   }
 }
 
@@ -48,19 +48,8 @@ android {
   }
 }
 
-repositories {
-  mavenCentral()
-  google()
-}
-
 dependencies {
   implementation 'com.facebook.react:react-android'
-  implementation 'com.facebook.react:react-native'
-  implementation "org.jetbrains.kotlin:kotlin-stdlib:1.8.0"
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:${safeExtGet('kotlinVersion', '1.8.0')}"
   implementation "com.google.android.gms:play-services-location:21.3.0"
-  
-  // For new architecture
-  if (project.findProperty("react.newArchEnabled") == "true") {
-    implementation project(":ReactAndroid")
-  }
 }

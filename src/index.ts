@@ -1,138 +1,80 @@
-import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
-import NativeRidableGpsTracker from './NativeRidableGpsTracker';
-import type { GpsConfig, LocationData, GpsStatus } from './types';
-import { LocationEvent, AuthorizationStatus, AccuracyLevel } from './types';
+import { NativeEventEmitter, Platform } from 'react-native'
+import NativeRidableGpsTracker from './NativeRidableGpsTracker'
+import type {
+  LocationConfig,
+  LocationData,
+  LocationStatus,
+  LocationEventCallback,
+} from './types'
 
 const LINKING_ERROR =
   `The package 'react-native-ridable-gps-tracker' doesn't seem to be linked. Make sure: \n\n` +
   Platform.select({ ios: "- Run 'pod install'\n", default: '' }) +
   '- Rebuild the app after installing the package\n' +
-  '- If you are using auto-linking, make sure it is enabled\n';
+  '- If using New Architecture, ensure Codegen has run\n'
 
-const RidableGpsTracker = NativeRidableGpsTracker
+// @ts-expect-error - NativeModule can be null
+const isTurboModuleEnabled = global.__turboModuleProxy != null
+
+const RidableGpsTrackerModule = isTurboModuleEnabled
   ? NativeRidableGpsTracker
-  : new Proxy(
-      {},
-      {
-        get() {
-          throw new Error(LINKING_ERROR);
-        },
-      }
-    );
+  : require('./NativeRidableGpsTracker').default
 
-const eventEmitter = new NativeEventEmitter(
-  NativeModules.RNRidableGpsTracker
-);
-
-// Event listener management
-let listenerCount = 0;
-const listeners = new Map<string, any>();
-
-function addListener(
-  eventType: LocationEvent,
-  listener: (data: any) => void
-) {
-  const subscription = eventEmitter.addListener(eventType, listener);
-  const key = `${eventType}_${listenerCount++}`;
-  listeners.set(key, subscription);
-  
-  // Tell native module we have a listener
-  RidableGpsTracker.addListener(eventType);
-  
-  return {
-    remove: () => {
-      subscription.remove();
-      listeners.delete(key);
-      RidableGpsTracker.removeListeners(1);
-    },
-  };
+if (!RidableGpsTrackerModule) {
+  throw new Error(LINKING_ERROR)
 }
 
-function removeAllListeners(eventType?: LocationEvent) {
-  if (eventType) {
-    listeners.forEach((subscription, key) => {
-      if (key.startsWith(eventType)) {
-        subscription.remove();
-        listeners.delete(key);
-      }
-    });
-    eventEmitter.removeAllListeners(eventType);
-  } else {
-    listeners.forEach((subscription) => {
-      subscription.remove();
-    });
-    listeners.clear();
-    eventEmitter.removeAllListeners();
+// @ts-expect-error - EventEmitter type
+const eventEmitter = new NativeEventEmitter(RidableGpsTrackerModule)
+
+class RidableGpsTracker {
+  private locationListener: any = null
+
+  async configure(config: LocationConfig): Promise<void> {
+    return RidableGpsTrackerModule.configure(config)
+  }
+
+  async start(): Promise<void> {
+    return RidableGpsTrackerModule.start()
+  }
+
+  async stop(): Promise<void> {
+    return RidableGpsTrackerModule.stop()
+  }
+
+  async getCurrentLocation(): Promise<LocationData> {
+    return RidableGpsTrackerModule.getCurrentLocation()
+  }
+
+  async checkStatus(): Promise<LocationStatus> {
+    return RidableGpsTrackerModule.checkStatus()
+  }
+
+  async requestPermissions(): Promise<boolean> {
+    return RidableGpsTrackerModule.requestPermissions()
+  }
+
+  openLocationSettings(): void {
+    RidableGpsTrackerModule.openLocationSettings()
+  }
+
+  addLocationListener(callback: LocationEventCallback): () => void {
+    this.locationListener = eventEmitter.addListener('location', callback)
+    RidableGpsTrackerModule.addListener('location')
+    
+    return () => {
+      this.removeLocationListener()
+    }
+  }
+
+  removeLocationListener(): void {
+    if (this.locationListener) {
+      this.locationListener.remove()
+      this.locationListener = null
+      RidableGpsTrackerModule.removeListeners(1)
+    }
   }
 }
 
-// Main API
-export const GpsTracker = {
-  /**
-   * Configure the GPS tracker with desired settings
-   */
-  configure: (config: GpsConfig): Promise<void> => {
-    return RidableGpsTracker.configure(config);
-  },
-
-  /**
-   * Start GPS tracking
-   */
-  start: (): Promise<void> => {
-    return RidableGpsTracker.start();
-  },
-
-  /**
-   * Stop GPS tracking
-   */
-  stop: (): Promise<void> => {
-    return RidableGpsTracker.stop();
-  },
-
-  /**
-   * Get current location (one-time)
-   */
-  getCurrentLocation: (): Promise<LocationData> => {
-    return RidableGpsTracker.getCurrentLocation();
-  },
-
-  /**
-   * Check GPS tracker status
-   */
-  checkStatus: (): Promise<GpsStatus> => {
-    return RidableGpsTracker.checkStatus();
-  },
-
-  /**
-   * Request location permissions
-   */
-  requestPermissions: (): Promise<boolean> => {
-    return RidableGpsTracker.requestPermissions();
-  },
-
-  /**
-   * Open device location settings
-   */
-  openLocationSettings: (): void => {
-    RidableGpsTracker.openLocationSettings();
-  },
-
-  /**
-   * Add event listener
-   */
-  addListener,
-
-  /**
-   * Remove all listeners for an event type
-   */
-  removeAllListeners,
-
-  // Constants
-  Events: LocationEvent,
-  AuthorizationStatus,
-  AccuracyLevel,
-};
-
-// Export types
-export * from './types';
-export default GpsTracker;
+export default new RidableGpsTracker()
+export * from './types'

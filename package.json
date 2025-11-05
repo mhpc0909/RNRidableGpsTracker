@@ -1,7 +1,7 @@
 {
   "name": "react-native-ridable-gps-tracker",
   "version": "1.0.0",
-  "description": "High-performance GPS tracking module for cycling apps with React Native Turbo Module",
+  "description": "High-performance GPS tracking module for cycling apps with React Native",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
@@ -17,9 +17,7 @@
     "location",
     "tracking",
     "cycling",
-    "fitness",
-    "turbo-module",
-    "new-architecture"
+    "fitness"
   ],
   "author": "Mike",
   "license": "MIT",
@@ -41,14 +39,6 @@
     "RNRidableGpsTracker.podspec",
     "README.md"
   ],
-  "codegenConfig": {
-    "name": "RNRidableGpsTrackerSpec",
-    "type": "modules",
-    "jsSrcsDir": "src",
-    "android": {
-      "javaPackageName": "com.rnridablegpstracker"
-    }
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/yourusername/RNRidable-gps-tracker.git"

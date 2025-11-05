@@ -2,6 +2,7 @@
 node_modules/
 npm-debug.log
 yarn-error.log
+yarn.lock
 
 # TypeScript
 *.tsbuildinfo
@@ -19,9 +20,24 @@ android/build/
 android/.gradle
 android/.idea
 android/local.properties
+android-example/.gradle/
+android-example/build/
+android-example/app/build/
+android-example/local.properties
 *.iml
 *.apk
 *.aab
+*.dex
+*.class
+
+# Yarn
+.yarn/
+.pnp.*
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
 
 # macOS
 .DS_Store

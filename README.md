@@ -1,17 +1,17 @@
-# react-native-ridable-gps-tracker
+# RNRidable GPS Tracker
 
-High-performance GPS tracking module for cycling apps, built with React Native Turbo Module architecture.
+High-performance GPS tracking module for React Native with Turbo Module architecture.
 
-## Features
+## 🎯 Features
 
-- 🚀 Turbo Native Module architecture for maximum performance
-- 📍 Accurate GPS tracking optimized for cycling
-- 🔋 Battery-efficient location updates
-- 📱 iOS and Android support
-- 🎯 Simple and clean API
-- ⚡ Background location tracking support
+- ✅ **Turbo Module** - New Architecture support
+- ✅ **Foreground Service** - Reliable background tracking
+- ✅ **Real-time Updates** - Event-based location streaming
+- ✅ **Configurable** - Distance filter, accuracy, update intervals
+- ✅ **Permission Handling** - Built-in permission requests
+- ✅ **Battery Optimized** - Smart location updates
 
-## Installation
+## 📦 Installation
 
 ```bash
 npm install react-native-ridable-gps-tracker
@@ -25,142 +25,120 @@ yarn add react-native-ridable-gps-tracker
 cd ios && pod install
 ```
 
-Add the following to your `Info.plist`:
-
+Add to your `Info.plist`:
 ```xml
 <key>NSLocationWhenInUseUsageDescription</key>
 <string>We need your location to track your rides</string>
 <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-<string>We need your location to track your rides even when the app is in the background</string>
-<key>UIBackgroundModes</key>
-<array>
-    <string>location</string>
-</array>
+<string>We need your location to track your rides in the background</string>
 ```
 
 ### Android
 
-Add the following to your `AndroidManifest.xml`:
+Already configured! Just make sure you have Google Play Services in your app.
 
-```xml
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
-```
-
-## Usage
+## 🚀 Usage
 
 ```typescript
-import GpsTracker, { LocationEvent } from 'react-native-ridable-gps-tracker';
+import RidableGpsTracker, { LocationEvent } from 'react-native-ridable-gps-tracker';
+import { NativeEventEmitter } from 'react-native';
 
-// Configure GPS tracker
-await GpsTracker.configure({
+// Create event emitter
+const eventEmitter = new NativeEventEmitter(RidableGpsTracker);
+
+// Configure GPS
+await RidableGpsTracker.configure({
   distanceFilter: 10, // meters
   desiredAccuracy: 'high',
-  activityType: 'fitness',
-  allowsBackgroundLocationUpdates: true,
-  interval: 1000, // Android only, milliseconds
-  fastestInterval: 500, // Android only, milliseconds
+  interval: 1000, // Android only
+  fastestInterval: 500, // Android only
+  allowsBackgroundLocationUpdates: true, // iOS only
 });
 
 // Request permissions
-const granted = await GpsTracker.requestPermissions();
+const granted = await RidableGpsTracker.requestPermissions();
 
 if (granted) {
   // Start tracking
-  await GpsTracker.start();
-
+  await RidableGpsTracker.start();
+  
   // Listen to location updates
-  const subscription = GpsTracker.addListener(
+  const subscription = eventEmitter.addListener(
     LocationEvent.LOCATION,
     (location) => {
-      console.log('Location:', location);
-      // {
-      //   latitude: 37.7749,
-      //   longitude: -122.4194,
-      //   altitude: 50,
-      //   accuracy: 10,
-      //   speed: 5.5,
-      //   bearing: 90,
-      //   timestamp: 1234567890000
-      // }
+      console.log('New location:', location);
+      // { latitude, longitude, altitude, speed, bearing, accuracy, timestamp }
     }
   );
-
-  // Get current location (one-time)
-  const location = await GpsTracker.getCurrentLocation();
-
-  // Check status
-  const status = await GpsTracker.checkStatus();
-  console.log('Status:', status);
-  // {
-  //   isRunning: true,
-  //   isAuthorized: true,
-  //   authorizationStatus: 'authorizedAlways'
-  // }
-
+  
   // Stop tracking
-  await GpsTracker.stop();
-
+  await RidableGpsTracker.stop();
+  
   // Clean up
   subscription.remove();
 }
 ```
 
-## API
+## 📖 API Reference
 
 ### Methods
 
 #### `configure(config: GpsConfig): Promise<void>`
+Configure GPS tracking parameters.
 
-Configure the GPS tracker with desired settings.
-
-**Config options:**
-- `distanceFilter` (number): Minimum distance in meters before location update (default: 10)
-- `desiredAccuracy` ('high' | 'medium' | 'low'): Accuracy level (default: 'high')
-- `activityType` ('fitness' | 'automotiveNavigation' | 'otherNavigation' | 'other'): iOS only (default: 'fitness')
-- `allowsBackgroundLocationUpdates` (boolean): Enable background updates (default: true)
-- `showsBackgroundLocationIndicator` (boolean): iOS only (default: true)
-- `pausesLocationUpdatesAutomatically` (boolean): iOS only (default: false)
-- `interval` (number): Android only, update interval in ms (default: 1000)
-- `fastestInterval` (number): Android only, fastest interval in ms (default: 500)
+```typescript
+interface GpsConfig {
+  distanceFilter: number;              // Distance in meters
+  desiredAccuracy: 'high' | 'medium' | 'low';
+  interval?: number;                    // Android: update interval (ms)
+  fastestInterval?: number;             // Android: fastest interval (ms)
+  activityType?: 'fitness' | 'automotiveNavigation' | 'otherNavigation' | 'other'; // iOS
+  allowsBackgroundLocationUpdates?: boolean;  // iOS
+  showsBackgroundLocationIndicator?: boolean; // iOS
+  pausesLocationUpdatesAutomatically?: boolean; // iOS
+}
+```
 
 #### `start(): Promise<void>`
-
 Start GPS tracking.
 
 #### `stop(): Promise<void>`
-
 Stop GPS tracking.
 
 #### `getCurrentLocation(): Promise<LocationData>`
-
-Get current location (one-time request).
+Get the last known location.
 
 #### `checkStatus(): Promise<GpsStatus>`
-
-Check GPS tracker status.
+Check GPS and permission status.
 
 #### `requestPermissions(): Promise<boolean>`
-
 Request location permissions.
 
 #### `openLocationSettings(): void`
-
 Open device location settings.
 
-#### `addListener(event: LocationEvent, callback: Function): Subscription`
+### Events
 
-Add event listener. Returns a subscription object with a `remove()` method.
+Listen to location events:
 
-**Events:**
-- `LocationEvent.LOCATION`: Location updates
-- `LocationEvent.ERROR`: Location errors
-- `LocationEvent.AUTHORIZATION_CHANGED`: Authorization status changes
+```typescript
+import { LocationEvent } from 'react-native-ridable-gps-tracker';
 
-#### `removeAllListeners(event?: LocationEvent): void`
+// Location updates
+eventEmitter.addListener(LocationEvent.LOCATION, (location) => {
+  console.log(location);
+});
 
-Remove all listeners for a specific event or all events.
+// Errors
+eventEmitter.addListener(LocationEvent.ERROR, (error) => {
+  console.error(error);
+});
+
+// Authorization changes
+eventEmitter.addListener(LocationEvent.AUTHORIZATION_CHANGED, (status) => {
+  console.log('Auth status:', status);
+});
+```
 
 ### Types
 
@@ -182,21 +160,85 @@ interface GpsStatus {
 }
 ```
 
-## Example
+## 🧪 Testing
 
-See the example app in the `example` directory for a complete implementation.
+### Android Example App
 
-## Performance Tips
+The `android-example` directory contains a native Android app that uses the module directly:
 
-1. **Distance Filter**: Set appropriate `distanceFilter` to reduce unnecessary updates
-2. **Accuracy**: Use 'medium' or 'low' accuracy if high precision is not required
-3. **Battery**: Lower accuracy and higher distance filters save battery
-4. **Background**: Only enable background updates when necessary
+```bash
+cd android-example
+./gradlew installDebug
+```
 
-## License
+This demonstrates:
+- ✅ Using the module from a native Android app
+- ✅ Foreground service with notifications
+- ✅ Real-time location updates
+- ✅ Permission handling
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────┐
+│  React Native (JavaScript)          │
+│  RNRidableGpsTracker.start()        │
+└──────────────┬──────────────────────┘
+               │ Turbo Module Bridge
+               ▼
+┌─────────────────────────────────────┐
+│  RNRidableGpsTrackerModule          │
+│  (Kotlin/Objective-C++)             │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  LocationService                    │
+│  (Foreground Service / CLLocationMgr)
+└─────────────────────────────────────┘
+```
+
+## 📱 Permissions
+
+### iOS
+- `NSLocationWhenInUseUsageDescription`
+- `NSLocationAlwaysAndWhenInUseUsageDescription`
+- `UIBackgroundModes` - location
+
+### Android
+- `ACCESS_FINE_LOCATION`
+- `ACCESS_COARSE_LOCATION`
+- `ACCESS_BACKGROUND_LOCATION` (Android 10+)
+- `FOREGROUND_SERVICE`
+- `FOREGROUND_SERVICE_LOCATION` (Android 10+)
+- `POST_NOTIFICATIONS` (Android 13+)
+
+## 🔧 Troubleshooting
+
+### Android: Service not starting
+Make sure you have requested all required permissions including `FOREGROUND_SERVICE` and `POST_NOTIFICATIONS`.
+
+### iOS: Location not updating in background
+Enable background modes in Xcode:
+1. Select your target
+2. Signing & Capabilities
+3. Add "Background Modes"
+4. Check "Location updates"
+
+### Module not found
+Make sure you have:
+1. Installed the module: `npm install`
+2. Run pod install (iOS)
+3. Rebuilt the app
+
+## 📄 License
 
 MIT
 
-## Author
+## 👤 Author
 
-Mike
+Mike - [KORA Project](https://github.com/yourusername)
+
+## 🙏 Contributing
+
+PRs welcome! This module is actively being developed for the KORA cycling app.

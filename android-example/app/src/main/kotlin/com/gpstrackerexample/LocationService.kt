@@ -3,12 +3,12 @@ package com.gpstrackerexample
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.location.Location
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
@@ -23,11 +23,21 @@ class LocationService : Service() {
     private var lastLocation: Location? = null
     private var locationListener: ((Location) -> Unit)? = null
     private var isForegroundStarted = false
+    
+    // 1초마다 마지막 위치 전송용
+    private val handler = Handler(Looper.getMainLooper())
+    private var repeatLocationRunnable: Runnable? = null
+    
+    // Configuration
+    private var distanceFilter: Float = 0f
+    private var updateInterval: Long = 1000L
+    private var fastestInterval: Long = 1000L
+    private var priority: Int = Priority.PRIORITY_HIGH_ACCURACY
 
     companion object {
         private const val TAG = "LocationService"
-        private const val CHANNEL_ID = "location_tracking_channel"
-        private const val NOTIFICATION_ID = 1
+        private const val CHANNEL_ID = "gps_tracker_example"
+        private const val NOTIFICATION_ID = 9999
         const val ACTION_START = "com.gpstrackerexample.ACTION_START"
         const val ACTION_STOP = "com.gpstrackerexample.ACTION_STOP"
     }
@@ -61,11 +71,6 @@ class LocationService : Service() {
                 stopForegroundTracking()
                 stopSelf()
             }
-            else -> {
-                // 서비스가 시작되면 자동으로 포그라운드 서비스로 시작
-                Log.d(TAG, "Starting foreground tracking (default)")
-                startForegroundTracking()
-            }
         }
         return START_STICKY
     }
@@ -74,10 +79,10 @@ class LocationService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "GPS 위치 추적",
+                "GPS Location Tracking",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "GPS 위치 추적이 진행 중입니다"
+                description = "Tracking your ride location with GPS"
                 setShowBadge(false)
             }
 
@@ -88,47 +93,44 @@ class LocationService : Service() {
     }
 
     private fun createNotification(): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val stopIntent = Intent(this, LocationService::class.java).apply {
-            action = ACTION_STOP
-        }
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            0,
-            stopIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
         val locationText = if (lastLocation != null) {
-            "위도: ${String.format("%.6f", lastLocation!!.latitude)}\n" +
-            "경도: ${String.format("%.6f", lastLocation!!.longitude)}\n" +
-            "속도: ${String.format("%.1f", if (lastLocation!!.hasSpeed()) lastLocation!!.speed * 3.6 else 0f)} km/h"
+            val provider = if (lastLocation!!.provider != null) lastLocation!!.provider else "unknown"
+            "Provider: $provider\n" +
+            "Lat: ${String.format("%.6f", lastLocation!!.latitude)}\n" +
+            "Lng: ${String.format("%.6f", lastLocation!!.longitude)}\n" +
+            "Speed: ${String.format("%.1f", if (lastLocation!!.hasSpeed()) lastLocation!!.speed * 3.6 else 0f)} km/h\n" +
+            "Accuracy: ${String.format("%.1f", lastLocation!!.accuracy)}m"
         } else {
-            "위치를 가져오는 중..."
+            "Waiting for GPS signal..."
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("🚴 GPS 위치 추적 중 (1초 간격)")
+            .setContentTitle("🚴 GPS Tracking (Exercise Mode)")
             .setContentText(locationText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(locationText))
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-            .setContentIntent(pendingIntent)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "중지",
-                stopPendingIntent
-            )
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
+    }
+
+    fun configure(
+        distanceFilter: Float,
+        updateInterval: Long,
+        fastestInterval: Long,
+        desiredAccuracy: String
+    ) {
+        this.distanceFilter = distanceFilter
+        this.updateInterval = updateInterval
+        this.fastestInterval = fastestInterval
+        this.priority = when (desiredAccuracy) {
+            "high" -> Priority.PRIORITY_HIGH_ACCURACY
+            "medium" -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
+            "low" -> Priority.PRIORITY_LOW_POWER
+            else -> Priority.PRIORITY_HIGH_ACCURACY
+        }
+        Log.d(TAG, "Configured: distance=$distanceFilter, interval=$updateInterval, priority=$priority")
     }
 
     fun startForegroundTracking() {
@@ -138,61 +140,106 @@ class LocationService : Service() {
         }
         
         try {
-            Log.d(TAG, "Creating location request")
+            Log.d(TAG, "Creating GPS-only location request for exercise tracking")
             
+            // GPS 전용 설정 (운동 앱용)
             val locationRequest = LocationRequest.Builder(
-                Priority.PRIORITY_HIGH_ACCURACY,
-                1000  // 1초 간격
+                Priority.PRIORITY_HIGH_ACCURACY,  // GPS 우선
+                updateInterval
             ).apply {
-                setMaxUpdateDelayMillis(2000)
-                setMinUpdateIntervalMillis(1000)  // 최소 1초 간격
-                setMinUpdateDistanceMeters(0f)  // 거리 필터 없음
+                setMaxUpdateDelayMillis(updateInterval * 2)
+                setMinUpdateIntervalMillis(fastestInterval)
+                setMinUpdateDistanceMeters(distanceFilter)
+                
+                // 운동 앱 최적화 설정
+                setWaitForAccurateLocation(true)  // 정확한 위치 대기
+                setGranularity(Granularity.GRANULARITY_FINE)  // 세밀한 위치 정보
             }.build()
 
             locationCallback = object : LocationCallback() {
                 override fun onLocationResult(locationResult: LocationResult) {
                     locationResult.lastLocation?.let { location ->
-                        lastLocation = location
-                        Log.d(TAG, "Location update: lat=${location.latitude}, lng=${location.longitude}, speed=${location.speed}")
-                        locationListener?.invoke(location)
-                        // 알림 업데이트
-                        updateNotification()
+                        // GPS Provider만 사용 (선택적 필터링)
+                        if (location.provider == "gps" || location.provider == "fused") {
+                            lastLocation = location
+                            Log.d(TAG, "GPS Location received: provider=${location.provider}, lat=${location.latitude}, lng=${location.longitude}, speed=${location.speed}, accuracy=${location.accuracy}m")
+                            sendLocationUpdate(location)
+                        } else {
+                            Log.d(TAG, "Ignoring non-GPS location from provider: ${location.provider}")
+                        }
                     }
                 }
             }
 
-            Log.d(TAG, "Requesting location updates")
+            Log.d(TAG, "Requesting GPS location updates")
             fusedLocationClient?.requestLocationUpdates(
                 locationRequest,
                 locationCallback!!,
                 Looper.getMainLooper()
             )
 
-            // 포그라운드 서비스로 시작
+            // 마지막 위치를 1초마다 반복 전송하는 Runnable 시작
+            startRepeatLocationUpdates()
+
+            // Start foreground service
             Log.d(TAG, "Starting foreground service with notification")
             startForeground(NOTIFICATION_ID, createNotification())
             isForegroundStarted = true
-            Log.d(TAG, "Foreground service started successfully")
+            Log.d(TAG, "GPS tracking started successfully")
         } catch (e: SecurityException) {
-            Log.e(TAG, "Security exception while starting foreground tracking", e)
-            e.printStackTrace()
+            Log.e(TAG, "Security exception while starting GPS tracking", e)
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting foreground tracking", e)
-            e.printStackTrace()
+            Log.e(TAG, "Error starting GPS tracking", e)
+            throw e
         }
     }
 
-    fun stopForegroundTracking() {
-        Log.d(TAG, "Stopping foreground tracking")
+    private fun startRepeatLocationUpdates() {
+        Log.d(TAG, "Starting repeat location updates (1 second interval)")
         
-        // 위치 업데이트 중지
+        repeatLocationRunnable = object : Runnable {
+            override fun run() {
+                // 마지막 GPS 위치가 있으면 1초마다 전송
+                lastLocation?.let { location ->
+                    Log.d(TAG, "Repeating last GPS location (for 1-second interval)")
+                    sendLocationUpdate(location)
+                }
+                
+                // 1초 후 다시 실행
+                handler.postDelayed(this, 1000L)
+            }
+        }
+        
+        // 즉시 시작
+        handler.post(repeatLocationRunnable!!)
+    }
+
+    private fun stopRepeatLocationUpdates() {
+        repeatLocationRunnable?.let {
+            handler.removeCallbacks(it)
+            Log.d(TAG, "Stopped repeat location updates")
+        }
+        repeatLocationRunnable = null
+    }
+
+    private fun sendLocationUpdate(location: Location) {
+        locationListener?.invoke(location)
+        updateNotification()
+    }
+
+    fun stopForegroundTracking() {
+        Log.d(TAG, "Stopping GPS tracking")
+        
+        // 반복 업데이트 중지
+        stopRepeatLocationUpdates()
+        
         locationCallback?.let {
             fusedLocationClient?.removeLocationUpdates(it)
-            Log.d(TAG, "Location updates removed")
+            Log.d(TAG, "GPS location updates removed")
         }
         locationCallback = null
         
-        // 포그라운드 서비스 중지 및 알림 제거
         if (isForegroundStarted) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -201,7 +248,7 @@ class LocationService : Service() {
                 stopForeground(true)
             }
             isForegroundStarted = false
-            Log.d(TAG, "Foreground service stopped and notification removed")
+            Log.d(TAG, "GPS tracking stopped and notification removed")
         }
     }
 
@@ -216,6 +263,8 @@ class LocationService : Service() {
     }
 
     fun getLastLocation(): Location? = lastLocation
+
+    fun isTracking(): Boolean = isForegroundStarted
 
     private fun updateNotification() {
         if (isForegroundStarted) {

@@ -26,7 +26,7 @@
             </intent-filter>
         </activity>
         
-        <!-- LocationService from the example app -->
+        <!-- LocationService (standalone, not from RN module) -->
         <service
             android:name=".LocationService"
             android:enabled="true"
