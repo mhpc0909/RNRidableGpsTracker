@@ -1,0 +1,25 @@
+{
+  "name": "RNRidableGpsTracker",
+  "version": "1.0.0",
+  "summary": "High-performance GPS tracking module for cycling apps with React Native Turbo Module",
+  "homepage": "https://github.com/yourusername/RNRidable-gps-tracker#readme",
+  "license": "MIT",
+  "authors": "Mike",
+  "platforms": {
+    "ios": "13.0"
+  },
+  "source": {
+    "git": "https://github.com/yourusername/RNRidable-gps-tracker.git",
+    "tag": "1.0.0"
+  },
+  "source_files": "ios/**/*.{h,m,mm,swift}",
+  "dependencies": {
+    "React-Core": [],
+    "React-RCTAppDelegate": [],
+    "React-Codegen": [],
+    "RCT-Folly": [],
+    "RCTRequired": [],
+    "RCTTypeSafety": [],
+    "ReactCommon/turbomodule/core": []
+  }
+}

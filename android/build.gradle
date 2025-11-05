@@ -1,0 +1,66 @@
+buildscript {
+  ext.safeExtGet = {prop, fallback ->
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+  }
+
+  repositories {
+    google()
+    mavenCentral()
+  }
+
+  dependencies {
+    classpath("com.android.tools.build:gradle")
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+  }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+  namespace "com.rnridablegpstracker"
+  compileSdkVersion safeExtGet('compileSdkVersion', 34)
+  
+  defaultConfig {
+    minSdkVersion safeExtGet('minSdkVersion', 24)
+    targetSdkVersion safeExtGet('targetSdkVersion', 34)
+  }
+
+  buildTypes {
+    release {
+      minifyEnabled false
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+
+  sourceSets {
+    main {
+      java.srcDirs = ['src/main/java']
+    }
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  implementation 'com.facebook.react:react-native'
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:1.8.0"
+  implementation "com.google.android.gms:play-services-location:21.3.0"
+  
+  // For new architecture
+  if (project.findProperty("react.newArchEnabled") == "true") {
+    implementation project(":ReactAndroid")
+  }
+}

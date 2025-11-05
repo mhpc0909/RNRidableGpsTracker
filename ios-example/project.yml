@@ -1,0 +1,41 @@
+name: GPSTrackerExample
+options:
+  bundleIdPrefix: com.rnridablegpstracker
+  deploymentTarget:
+    iOS: "13.0"
+  xcodeVersion: "14.0"
+
+targets:
+  GPSTrackerExample:
+    type: application
+    platform: iOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: GPSTrackerExample
+        excludes:
+          - "**/*.plist"
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.rnridablegpstracker.example
+      PRODUCT_NAME: $(TARGET_NAME)
+      INFOPLIST_FILE: GPSTrackerExample/Info.plist
+      SWIFT_VERSION: "5.0"
+      DEVELOPMENT_TEAM: ""
+      CODE_SIGN_STYLE: Automatic
+      TARGETED_DEVICE_FAMILY: "1" # iPhone only
+    info:
+      path: GPSTrackerExample/Info.plist
+      properties:
+        UILaunchStoryboardName: ""
+        UIMainStoryboardFile: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+        LSRequiresIPhoneOS: true
+        NSLocationWhenInUseUsageDescription: "이 앱은 GPS 위치 추적 기능을 테스트하기 위해 위치 권한이 필요합니다."
+        NSLocationAlwaysAndWhenInUseUsageDescription: "이 앱은 백그라운드에서도 GPS 위치를 추적하여 라이딩 경로를 기록하기 위해 항상 위치 권한이 필요합니다."
+        NSLocationAlwaysUsageDescription: "이 앱은 백그라운드에서 GPS 추적을 지원합니다."
+        UIBackgroundModes:
+          - location

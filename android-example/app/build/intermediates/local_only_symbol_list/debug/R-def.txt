@@ -1,0 +1,15 @@
+R_DEF: Internal format may change without notice
+local
+id clear_history_button
+id get_current_button
+id history_scroll
+id history_text
+id location_text
+id request_perm_button
+id start_button
+id status_text
+id stop_button
+layout activity_main
+mipmap ic_launcher
+mipmap ic_launcher_round
+string app_name
