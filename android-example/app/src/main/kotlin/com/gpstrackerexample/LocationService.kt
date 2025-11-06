@@ -3,7 +3,6 @@ package com.rnridablegpstracker
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -21,6 +20,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
 import kotlin.math.pow
+import kotlin.math.sqrt
+import kotlin.math.abs
 
 class LocationService : Service(), SensorEventListener {
 
@@ -28,24 +29,45 @@ class LocationService : Service(), SensorEventListener {
     private var fusedLocationClient: FusedLocationProviderClient? = null
     private var locationCallback: LocationCallback? = null
     private var lastLocation: Location? = null
-    private var locationListener: ((Location, BarometerData?) -> Unit)? = null
+    private var locationListener: ((Location, SensorData?) -> Unit)? = null
     private var isForegroundStarted = false
     private var isNewLocationAvailable = false
     
-    // 기압계 관련
+    // 센서 관련
     private var sensorManager: SensorManager? = null
     private var pressureSensor: Sensor? = null
-    private var referencePressure: Float? = null  // 시작점 기압
+    private var accelerometerSensor: Sensor? = null
+    private var gyroscopeSensor: Sensor? = null
+    
+    // 기압계 관련
+    private var referencePressure: Float? = null
     private var currentPressure: Float? = null
     private var relativeAltitude: Float = 0f
-    
-    // 🆕 칼만 필터 관련
     private var startGpsAltitude: Float? = null
     private var enhancedAltitude: Float = 0f
     
-    // 🆕 가중치 (조정 가능)
-    private val GPS_WEIGHT = 0.3f  // GPS 신뢰도
-    private val BARO_WEIGHT = 0.7f  // 기압계 신뢰도 (단기 변화에 민감)
+    // 🆕 가속계 관련
+    private var lastAccelerometerData: FloatArray = FloatArray(3)
+    private var accelerometerTimestamp: Long = 0
+    private val accelerometerBuffer = mutableListOf<AccelerometerReading>()
+    private val maxBufferSize = 10 // 최근 10개 데이터
+    
+    // 🆕 자이로스코프 관련
+    private var lastGyroscopeData: FloatArray = FloatArray(3)
+    private var gyroscopeTimestamp: Long = 0
+    private val gyroscopeBuffer = mutableListOf<GyroscopeReading>()
+    
+    // Kalman 필터 상태 변수
+    private var kalmanLat: Double = 0.0
+    private var kalmanLng: Double = 0.0
+    private var variance: Double = 0.0
+    private var isKalmanInitialized = false
+    
+    // 운동 타입별 필터 파라미터
+    private var processNoise: Double = 0.0
+    private var useKalmanFilter: Boolean = false
+    private var exerciseType: String = "bicycle"
+    private var advancedTracking: Boolean = false
     
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
@@ -65,14 +87,62 @@ class LocationService : Service(), SensorEventListener {
         const val ACTION_START = "com.rnridablegpstracker.ACTION_START"
         const val ACTION_STOP = "com.rnridablegpstracker.ACTION_STOP"
         
-        // 기압-고도 변환 상수 (해수면 기압 기준)
-        private const val SEA_LEVEL_PRESSURE = 1013.25f  // hPa
+        private const val SEA_LEVEL_PRESSURE = 1013.25f
+        private const val GRAVITY = 9.81f
     }
     
+    // 🆕 센서 데이터 클래스들
+    data class AccelerometerReading(
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val timestamp: Long
+    )
+    
+    data class GyroscopeReading(
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val timestamp: Long
+    )
+    
     data class BarometerData(
-        val pressure: Float,              // 현재 기압 (hPa)
-        val relativeAltitude: Float,      // 상대 고도 (m)
-        val enhancedAltitude: Float       // 보정된 고도 (m) - 칼만 필터 적용
+        val pressure: Float,
+        val relativeAltitude: Float,
+        val enhancedAltitude: Float
+    )
+    
+    // 🆕 운동 분석 데이터
+    data class MotionAnalysis(
+        val roadSurfaceQuality: String,      // "smooth", "rough", "very_rough"
+        val vibrationIntensity: Float,       // 0.0 ~ 1.0
+        val corneringIntensity: Float,       // 0.0 ~ 1.0
+        val inclineAngle: Float,             // -90 ~ 90 (도)
+        val isClimbing: Boolean,
+        val isDescending: Boolean,
+        val verticalAcceleration: Float
+    )
+    
+    // 🆕 통합 센서 데이터
+    data class SensorData(
+        val barometer: BarometerData?,
+        val accelerometer: AccelerometerData?,
+        val gyroscope: GyroscopeData?,
+        val motionAnalysis: MotionAnalysis?
+    )
+    
+    data class AccelerometerData(
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val magnitude: Float
+    )
+    
+    data class GyroscopeData(
+        val x: Float,
+        val y: Float,
+        val z: Float,
+        val rotationRate: Float
     )
 
     inner class LocalBinder : Binder() {
@@ -84,7 +154,7 @@ class LocationService : Service(), SensorEventListener {
         Log.d(TAG, "Service onCreate")
         createNotificationChannel()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        setupBarometer()
+        setupSensors()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -103,88 +173,288 @@ class LocationService : Service(), SensorEventListener {
             ACTION_STOP -> {
                 Log.d(TAG, "Stopping foreground tracking")
                 stopForegroundTracking()
-                stopSelf()
             }
         }
         return START_STICKY
     }
 
-    private fun setupBarometer() {
+    private fun setupSensors() {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        pressureSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
         
+        // 기압계
+        pressureSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
         if (pressureSensor != null) {
-            Log.d(TAG, "✅ Barometer sensor available: ${pressureSensor!!.name}")
-        } else {
-            Log.w(TAG, "⚠️ Barometer sensor not available on this device")
+            Log.d(TAG, "✅ Barometer available: ${pressureSensor!!.name}")
+        }
+        
+        // 🆕 가속계
+        accelerometerSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (accelerometerSensor != null) {
+            Log.d(TAG, "✅ Accelerometer available: ${accelerometerSensor!!.name}")
+        }
+        
+        // 🆕 자이로스코프
+        gyroscopeSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        if (gyroscopeSensor != null) {
+            Log.d(TAG, "✅ Gyroscope available: ${gyroscopeSensor!!.name}")
         }
     }
 
-    private fun startBarometer() {
+    private fun startSensors() {
+        // 기압계 시작
         pressureSensor?.let { sensor ->
-            // 기압 센서 리스너 등록 (SENSOR_DELAY_NORMAL = ~200ms)
             sensorManager?.registerListener(
                 this,
                 sensor,
                 SensorManager.SENSOR_DELAY_NORMAL
             )
-            Log.d(TAG, "Barometer started")
+            Log.d(TAG, "📊 Barometer started")
+        }
+        
+        // 🆕 가속계 시작 (advancedTracking일 때만)
+        if (advancedTracking) {
+            accelerometerSensor?.let { sensor ->
+                sensorManager?.registerListener(
+                    this,
+                    sensor,
+                    SensorManager.SENSOR_DELAY_GAME // 50Hz 정도
+                )
+                Log.d(TAG, "📊 Accelerometer started (advanced tracking)")
+            }
+            
+            // 🆕 자이로스코프 시작
+            gyroscopeSensor?.let { sensor ->
+                sensorManager?.registerListener(
+                    this,
+                    sensor,
+                    SensorManager.SENSOR_DELAY_GAME
+                )
+                Log.d(TAG, "📊 Gyroscope started (advanced tracking)")
+            }
         }
     }
 
-    private fun stopBarometer() {
-        pressureSensor?.let {
-            sensorManager?.unregisterListener(this)
-            referencePressure = null
-            currentPressure = null
-            relativeAltitude = 0f
-            // 🆕 칼만 필터 변수 초기화
-            startGpsAltitude = null
-            enhancedAltitude = 0f
-            Log.d(TAG, "Barometer stopped")
-        }
+    private fun stopSensors() {
+        sensorManager?.unregisterListener(this)
+        
+        // 상태 초기화
+        referencePressure = null
+        currentPressure = null
+        relativeAltitude = 0f
+        startGpsAltitude = null
+        enhancedAltitude = 0f
+        
+        accelerometerBuffer.clear()
+        gyroscopeBuffer.clear()
+        lastAccelerometerData = FloatArray(3)
+        lastGyroscopeData = FloatArray(3)
+        
+        Log.d(TAG, "📊 All sensors stopped")
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        if (event?.sensor?.type == Sensor.TYPE_PRESSURE) {
-            val pressure = event.values[0]  // hPa (hectopascals)
-            currentPressure = pressure
+        if (event == null) return
+        
+        when (event.sensor.type) {
+            Sensor.TYPE_PRESSURE -> handlePressureData(event)
+            Sensor.TYPE_ACCELEROMETER -> handleAccelerometerData(event)
+            Sensor.TYPE_GYROSCOPE -> handleGyroscopeData(event)
+        }
+    }
+    
+    // 기압계 데이터 처리
+    private fun handlePressureData(event: SensorEvent) {
+        val pressure = event.values[0]
+        currentPressure = pressure
+        
+        if (referencePressure == null) {
+            referencePressure = pressure
+            Log.d(TAG, "Reference pressure set: $pressure hPa")
+        }
+        
+        referencePressure?.let { refPressure ->
+            relativeAltitude = 44330f * (1f - (pressure / refPressure).pow(0.1903f))
             
-            // 첫 기압 측정 시 기준점으로 설정
-            if (referencePressure == null) {
-                referencePressure = pressure
-                Log.d(TAG, "Reference pressure set: $pressure hPa")
-            }
-            
-            // 기압 차이로 상대 고도 계산
-            // 고도 = 44330 * (1 - (P/P0)^0.1903)
-            referencePressure?.let { refPressure ->
-                relativeAltitude = 44330f * (1f - (pressure / refPressure).pow(0.1903f))
-                
-                // 🆕 칼만 필터 융합 (GPS와 기압계 데이터 결합)
-                lastLocation?.let { location ->
-                    if (location.hasAltitude() && startGpsAltitude != null) {
-                        val gpsAlt = location.altitude.toFloat()
-                        
-                        // 기압계 기반 절대 고도 = 시작 GPS 고도 + 상대 변화량
-                        val baroAltitude = startGpsAltitude!! + relativeAltitude
-                        
-                        // 칼만 필터: GPS(30%) + 기압계(70%) 가중 평균
-                        enhancedAltitude = (gpsAlt * GPS_WEIGHT) + (baroAltitude * BARO_WEIGHT)
-                        
-                        Log.d(TAG, "📊 Altitude fusion: GPS=${String.format("%.1f", gpsAlt)}m, " +
-                                "Baro=${String.format("%.1f", baroAltitude)}m, " +
-                                "Enhanced=${String.format("%.1f", enhancedAltitude)}m")
-                    }
+            lastLocation?.let { location ->
+                if (location.hasAltitude() && startGpsAltitude != null) {
+                    val gpsAlt = location.altitude.toFloat()
+                    val baroAltitude = startGpsAltitude!! + relativeAltitude
+                    enhancedAltitude = (gpsAlt * 0.3f) + (baroAltitude * 0.7f)
                 }
-                
-                Log.d(TAG, "Barometer: pressure=$pressure hPa, relative altitude=$relativeAltitude m")
             }
         }
     }
+    
+    // 🆕 가속계 데이터 처리
+    private fun handleAccelerometerData(event: SensorEvent) {
+        if (!advancedTracking) return
+        
+        val x = event.values[0]
+        val y = event.values[1]
+        val z = event.values[2]
+        val timestamp = System.currentTimeMillis()
+        
+        lastAccelerometerData[0] = x
+        lastAccelerometerData[1] = y
+        lastAccelerometerData[2] = z
+        accelerometerTimestamp = timestamp
+        
+        // 버퍼에 추가
+        val reading = AccelerometerReading(x, y, z, timestamp)
+        accelerometerBuffer.add(reading)
+        
+        // 버퍼 크기 제한
+        if (accelerometerBuffer.size > maxBufferSize) {
+            accelerometerBuffer.removeAt(0)
+        }
+    }
+    
+    // 🆕 자이로스코프 데이터 처리
+    private fun handleGyroscopeData(event: SensorEvent) {
+        if (!advancedTracking) return
+        
+        val x = event.values[0]
+        val y = event.values[1]
+        val z = event.values[2]
+        val timestamp = System.currentTimeMillis()
+        
+        lastGyroscopeData[0] = x
+        lastGyroscopeData[1] = y
+        lastGyroscopeData[2] = z
+        gyroscopeTimestamp = timestamp
+        
+        // 버퍼에 추가
+        val reading = GyroscopeReading(x, y, z, timestamp)
+        gyroscopeBuffer.add(reading)
+        
+        if (gyroscopeBuffer.size > maxBufferSize) {
+            gyroscopeBuffer.removeAt(0)
+        }
+    }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // 정확도 변경 시 (필요시 처리)
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    // 🆕 운동 분석 생성
+    private fun generateMotionAnalysis(): MotionAnalysis? {
+        if (!advancedTracking || accelerometerBuffer.isEmpty()) {
+            return null
+        }
+        
+        // 1. 노면 상태 분석 (가속도 변화율)
+        val vibrationIntensity = calculateVibrationIntensity()
+        val roadSurfaceQuality = when {
+            vibrationIntensity < 0.2f -> "smooth"
+            vibrationIntensity < 0.5f -> "rough"
+            else -> "very_rough"
+        }
+        
+        // 2. 코너링 강도 (자이로스코프 Z축)
+        val corneringIntensity = if (gyroscopeBuffer.isNotEmpty()) {
+            val avgRotationZ = gyroscopeBuffer.map { abs(it.z) }.average().toFloat()
+            (avgRotationZ / 3.0f).coerceIn(0f, 1f) // 정규화
+        } else {
+            0f
+        }
+        
+        // 3. 경사도 분석 (가속도계 기반)
+        val (inclineAngle, isClimbing, isDescending) = calculateIncline()
+        
+        // 4. 수직 가속도 (오르막/내리막 강도)
+        val verticalAcceleration = lastAccelerometerData[2] - GRAVITY
+        
+        return MotionAnalysis(
+            roadSurfaceQuality = roadSurfaceQuality,
+            vibrationIntensity = vibrationIntensity,
+            corneringIntensity = corneringIntensity,
+            inclineAngle = inclineAngle,
+            isClimbing = isClimbing,
+            isDescending = isDescending,
+            verticalAcceleration = verticalAcceleration
+        )
+    }
+    
+    // 🆕 진동 강도 계산 (노면 품질)
+    private fun calculateVibrationIntensity(): Float {
+        if (accelerometerBuffer.size < 2) return 0f
+        
+        var totalVariation = 0f
+        for (i in 1 until accelerometerBuffer.size) {
+            val prev = accelerometerBuffer[i - 1]
+            val curr = accelerometerBuffer[i]
+            
+            val dx = curr.x - prev.x
+            val dy = curr.y - prev.y
+            val dz = curr.z - prev.z
+            
+            totalVariation += sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        
+        val avgVariation = totalVariation / (accelerometerBuffer.size - 1)
+        
+        // 정규화 (경험적 값: 0.5 ~ 3.0 범위를 0 ~ 1로)
+        return ((avgVariation - 0.5f) / 2.5f).coerceIn(0f, 1f)
+    }
+    
+    // 🆕 경사도 계산
+    private fun calculateIncline(): Triple<Float, Boolean, Boolean> {
+        if (accelerometerBuffer.isEmpty()) {
+            return Triple(0f, false, false)
+        }
+        
+        // 최근 데이터의 평균
+        val avgX = accelerometerBuffer.map { it.x }.average().toFloat()
+        val avgY = accelerometerBuffer.map { it.y }.average().toFloat()
+        val avgZ = accelerometerBuffer.map { it.z }.average().toFloat()
+        
+        // 중력 방향을 기준으로 경사도 계산
+        // 기기가 수평일 때 Z ≈ 9.81, X ≈ 0, Y ≈ 0
+        // 앞으로 기울면 Y가 증가, 뒤로 기울면 Y가 감소
+        
+        val totalAccel = sqrt(avgX * avgX + avgY * avgY + avgZ * avgZ)
+        val pitchAngle = Math.toDegrees(
+            kotlin.math.atan2(avgY.toDouble(), avgZ.toDouble())
+        ).toFloat()
+        
+        val isClimbing = pitchAngle > 5f  // 5도 이상 오르막
+        val isDescending = pitchAngle < -5f  // 5도 이상 내리막
+        
+        return Triple(pitchAngle, isClimbing, isDescending)
+    }
+
+    private fun initKalmanFilter(location: Location) {
+        kalmanLat = location.latitude
+        kalmanLng = location.longitude
+        variance = (location.accuracy * location.accuracy).toDouble()
+        isKalmanInitialized = true
+        
+        Log.d(TAG, "[KalmanFilter] Initialized: lat=$kalmanLat, lng=$kalmanLng, variance=$variance")
+    }
+
+    private fun resetKalmanFilter() {
+        isKalmanInitialized = false
+        variance = 0.0
+        Log.d(TAG, "[KalmanFilter] Reset")
+    }
+
+    private fun applyKalmanFilter(newLocation: Location): Location {
+        if (!isKalmanInitialized) {
+            initKalmanFilter(newLocation)
+            return newLocation
+        }
+        
+        val measurementNoise = (newLocation.accuracy * newLocation.accuracy).toDouble()
+        val predictedVariance = variance + processNoise
+        val kalmanGain = predictedVariance / (predictedVariance + measurementNoise)
+        
+        kalmanLat = kalmanLat + kalmanGain * (newLocation.latitude - kalmanLat)
+        kalmanLng = kalmanLng + kalmanGain * (newLocation.longitude - kalmanLng)
+        variance = (1.0 - kalmanGain) * predictedVariance
+        
+        return Location(newLocation).apply {
+            latitude = kalmanLat
+            longitude = kalmanLng
+            accuracy = sqrt(variance).toFloat()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -200,26 +470,29 @@ class LocationService : Service(), SensorEventListener {
 
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
-            Log.d(TAG, "Notification channel created")
         }
     }
 
     private fun createNotification(): Notification {
+        val kalmanStatus = if (useKalmanFilter) "ON" else "OFF"
+        val advancedStatus = if (advancedTracking) "ON" else "OFF"
+        
         val locationText = if (lastLocation != null) {
-            val provider = if (lastLocation!!.provider != null) lastLocation!!.provider else "unknown"
-            val barometerText = currentPressure?.let { 
-                "\nPressure: ${String.format("%.1f", it)} hPa" +
-                "\nGPS Alt: ${String.format("%.1f", lastLocation!!.altitude)}m" +
-                "\nEnhanced Alt: ${String.format("%.1f", enhancedAltitude)}m" +  // 🆕
-                "\nAlt Δ: ${String.format("%.1f", relativeAltitude)}m"
-            } ?: ""
+            val baseInfo = "Exercise: $exerciseType (K:$kalmanStatus, ADV:$advancedStatus)\n" +
+                    "Lat: ${String.format("%.6f", lastLocation!!.latitude)}\n" +
+                    "Lng: ${String.format("%.6f", lastLocation!!.longitude)}\n" +
+                    "Speed: ${String.format("%.1f", if (lastLocation!!.hasSpeed()) lastLocation!!.speed * 3.6 else 0f)} km/h"
             
-            "Provider: $provider\n" +
-            "Lat: ${String.format("%.6f", lastLocation!!.latitude)}\n" +
-            "Lng: ${String.format("%.6f", lastLocation!!.longitude)}\n" +
-            "Speed: ${String.format("%.1f", if (lastLocation!!.hasSpeed()) lastLocation!!.speed * 3.6 else 0f)} km/h\n" +
-            "Accuracy: ${String.format("%.1f", lastLocation!!.accuracy)}m" +
-            barometerText
+            val motionInfo = if (advancedTracking && accelerometerBuffer.isNotEmpty()) {
+                val analysis = generateMotionAnalysis()
+                analysis?.let {
+                    "\nSurface: ${it.roadSurfaceQuality}\n" +
+                    "Vibration: ${String.format("%.2f", it.vibrationIntensity)}\n" +
+                    "Incline: ${String.format("%.1f", it.inclineAngle)}°"
+                } ?: ""
+            } else ""
+            
+            baseInfo + motionInfo
         } else {
             "Waiting for GPS signal..."
         }
@@ -240,197 +513,231 @@ class LocationService : Service(), SensorEventListener {
         interval: Long,
         fastestInterval: Long,
         desiredAccuracy: String,
-        exerciseType: String = "bicycle"  // 🆕 기본값 bicycle
+        exerciseType: String = "bicycle",
+        advancedTracking: Boolean = false
     ) {
         this.distanceFilter = distanceFilter
         this.updateInterval = interval
         this.fastestInterval = fastestInterval
+        this.exerciseType = exerciseType
+        this.advancedTracking = advancedTracking
         
         when (exerciseType) {
             "bicycle" -> {
-                // 자전거 특화 설정
                 this.priority = Priority.PRIORITY_HIGH_ACCURACY
+                this.useKalmanFilter = false
+                this.processNoise = 0.0
+                Log.d(TAG, "🚴 Bicycle mode: Kalman=$useKalmanFilter, Advanced=$advancedTracking")
             }
             "running" -> {
-                // 러닝 특화 설정
                 this.priority = Priority.PRIORITY_HIGH_ACCURACY
+                this.useKalmanFilter = true
+                this.processNoise = 0.5
+                Log.d(TAG, "🏃 Running mode: Kalman=$useKalmanFilter, Advanced=$advancedTracking")
             }
             "hiking" -> {
-                // 하이킹 특화 설정
                 this.priority = Priority.PRIORITY_HIGH_ACCURACY
+                this.useKalmanFilter = true
+                this.processNoise = 1.0
+                Log.d(TAG, "🥾 Hiking mode: Kalman=$useKalmanFilter, Advanced=$advancedTracking")
             }
             "walking" -> {
-                // 걷기 특화 설정
-                this.priority = Priority.PRIORITY_BALANCED_POWER_ACCURACY
+                this.priority = Priority.PRIORITY_HIGH_ACCURACY
+                this.useKalmanFilter = true
+                this.processNoise = 2.0
+                Log.d(TAG, "🚶 Walking mode: Kalman=$useKalmanFilter, Advanced=$advancedTracking")
             }
         }
-        
-        Log.d(TAG, "Configured: distance=$distanceFilter, interval=$interval, priority=$priority")
     }
 
     fun startForegroundTracking() {
         if (isForegroundStarted) {
-            Log.d(TAG, "Foreground tracking already started")
-            return
+            Log.d(TAG, "⚠️ Already started, stopping first...")
+            stopForegroundTracking()
+            handler.postDelayed({
+                startForegroundTrackingInternal()
+            }, 100)
+        } else {
+            startForegroundTrackingInternal()
         }
-        
+    }
+
+    private fun startForegroundTrackingInternal() {
         try {
-            Log.d(TAG, "Creating GPS-only location request for exercise tracking")
+            Log.d(TAG, "🚀 Starting GPS tracking: $exerciseType (Advanced: $advancedTracking)")
             
-            // GPS 전용 설정 (운동 앱용)
+            locationCallback?.let { callback ->
+                fusedLocationClient?.removeLocationUpdates(callback)
+            }
+            
+            resetKalmanFilter()
+            lastLocation = null
+            isNewLocationAvailable = false
+            lastSendTime = 0
+            
             val locationRequest = LocationRequest.Builder(
-                Priority.PRIORITY_HIGH_ACCURACY,  // GPS 우선
+                Priority.PRIORITY_HIGH_ACCURACY,
                 updateInterval
             ).apply {
                 setMaxUpdateDelayMillis(updateInterval * 2)
                 setMinUpdateIntervalMillis(fastestInterval)
                 setMinUpdateDistanceMeters(distanceFilter)
-                
-                // 운동 앱 최적화 설정
-                setWaitForAccurateLocation(true)  // 정확한 위치 대기
-                setGranularity(Granularity.GRANULARITY_FINE)  // 세밀한 위치 정보
+                setWaitForAccurateLocation(true)
+                setGranularity(Granularity.GRANULARITY_FINE)
             }.build()
 
             locationCallback = object : LocationCallback() {
                 override fun onLocationResult(locationResult: LocationResult) {
                     locationResult.lastLocation?.let { location ->
-                        // GPS Provider만 사용 (선택적 필터링)
                         if (location.provider == "gps" || location.provider == "fused") {
-                            // 🆕 첫 GPS 고도를 기준점으로 설정
-                            if (startGpsAltitude == null && location.hasAltitude()) {
-                                startGpsAltitude = location.altitude.toFloat()
-                                enhancedAltitude = startGpsAltitude!!
-                                Log.d(TAG, "🎯 Start GPS altitude set: ${startGpsAltitude}m")
+                            val processedLocation = if (useKalmanFilter) {
+                                applyKalmanFilter(location)
+                            } else {
+                                location
                             }
                             
-                            lastLocation = location
-                            isNewLocationAvailable = true
+                            if (startGpsAltitude == null && processedLocation.hasAltitude()) {
+                                startGpsAltitude = processedLocation.altitude.toFloat()
+                                enhancedAltitude = startGpsAltitude!!
+                            }
                             
-                            Log.d(TAG, "🆕 NEW GPS Location received: provider=${location.provider}, lat=${location.latitude}, lng=${location.longitude}")
-                        } else {
-                            Log.d(TAG, "Ignoring non-GPS location from provider: ${location.provider}")
+                            lastLocation = processedLocation
+                            isNewLocationAvailable = true
                         }
                     }
                 }
             }
 
-            Log.d(TAG, "Requesting GPS location updates")
             fusedLocationClient?.requestLocationUpdates(
                 locationRequest,
                 locationCallback!!,
                 Looper.getMainLooper()
             )
 
-            // 기압계 시작
-            startBarometer()
-
-            // 마지막 위치를 1초마다 반복 전송하는 Runnable 시작
+            startSensors()
             startRepeatLocationUpdates()
 
-            // Start foreground service
-            Log.d(TAG, "Starting foreground service with notification")
             startForeground(NOTIFICATION_ID, createNotification())
             isForegroundStarted = true
-            Log.d(TAG, "GPS tracking started successfully")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Security exception while starting GPS tracking", e)
-            throw e
+            Log.d(TAG, "✅ GPS tracking started successfully")
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting GPS tracking", e)
+            Log.e(TAG, "❌ Error starting GPS tracking", e)
             throw e
         }
     }
 
     private fun startRepeatLocationUpdates() {
-        Log.d(TAG, "Starting repeat location updates (1 second interval)")
+        repeatLocationRunnable?.let {
+            handler.removeCallbacks(it)
+        }
         
         lastSendTime = System.currentTimeMillis()
         
         repeatLocationRunnable = object : Runnable {
             override fun run() {
-                // 추적 중이 아니면 중단
-                if (!isForegroundStarted) {
-                    Log.d(TAG, "⚠️ Tracking stopped - cancelling repeat updates")
-                    return
-                }
+                if (!isForegroundStarted) return
                 
                 val now = System.currentTimeMillis()
-                val elapsed = now - lastSendTime
-                
-                // 1초 이상 경과했을 때만 전송
-                if (elapsed >= 1000) {
+                if (now - lastSendTime >= 1000) {
                     lastLocation?.let { location ->
-                        val isNew = isNewLocationAvailable
-                        if (isNew) {
-                            Log.d(TAG, "🆕 Sending NEW location data")
-                        }
-                        sendLocationUpdate(location, isNew = isNew)
-                        if (isNew) {
+                        sendLocationUpdate(location, isNewLocationAvailable)
+                        if (isNewLocationAvailable) {
                             isNewLocationAvailable = false
                         }
                         lastSendTime = now
                     }
                 }
                 
-                // 다음 실행 예약 (추적 중일 때만)
                 if (isForegroundStarted) {
                     handler.postDelayed(this, 1000L)
                 }
             }
         }
         
-        // 1초 후 시작
         handler.postDelayed(repeatLocationRunnable!!, 1000L)
     }
 
     private fun stopRepeatLocationUpdates() {
         repeatLocationRunnable?.let {
             handler.removeCallbacks(it)
-            Log.d(TAG, "Stopped repeat location updates")
         }
         repeatLocationRunnable = null
     }
 
     private fun sendLocationUpdate(location: Location, isNew: Boolean) {
-        // 추적 중이 아니면 전송하지 않음
-        if (!isForegroundStarted) {
-            Log.d(TAG, "⚠️ Not tracking - skipping location update")
-            return
-        }
+        if (!isForegroundStarted) return
         
+        // 기압계 데이터
         val barometerData = currentPressure?.let { pressure ->
             BarometerData(
                 pressure = pressure,
                 relativeAltitude = relativeAltitude,
-                enhancedAltitude = enhancedAltitude  // 🆕 칼만 필터 융합 고도
+                enhancedAltitude = enhancedAltitude
             )
         }
         
-        locationListener?.invoke(location, barometerData)
+        // 🆕 가속계 데이터
+        val accelerometerData = if (advancedTracking && accelerometerTimestamp > 0) {
+            val magnitude = sqrt(
+                lastAccelerometerData[0] * lastAccelerometerData[0] +
+                lastAccelerometerData[1] * lastAccelerometerData[1] +
+                lastAccelerometerData[2] * lastAccelerometerData[2]
+            )
+            AccelerometerData(
+                x = lastAccelerometerData[0],
+                y = lastAccelerometerData[1],
+                z = lastAccelerometerData[2],
+                magnitude = magnitude
+            )
+        } else null
+        
+        // 🆕 자이로스코프 데이터
+        val gyroscopeData = if (advancedTracking && gyroscopeTimestamp > 0) {
+            val rotationRate = sqrt(
+                lastGyroscopeData[0] * lastGyroscopeData[0] +
+                lastGyroscopeData[1] * lastGyroscopeData[1] +
+                lastGyroscopeData[2] * lastGyroscopeData[2]
+            )
+            GyroscopeData(
+                x = lastGyroscopeData[0],
+                y = lastGyroscopeData[1],
+                z = lastGyroscopeData[2],
+                rotationRate = rotationRate
+            )
+        } else null
+        
+        // 🆕 운동 분석 데이터
+        val motionAnalysis = if (advancedTracking) {
+            generateMotionAnalysis()
+        } else null
+        
+        val sensorData = SensorData(
+            barometer = barometerData,
+            accelerometer = accelerometerData,
+            gyroscope = gyroscopeData,
+            motionAnalysis = motionAnalysis
+        )
+        
+        locationListener?.invoke(location, sensorData)
         updateNotification()
     }
 
     fun stopForegroundTracking() {
-        Log.d(TAG, "Stopping GPS tracking")
+        Log.d(TAG, "🛑 Stopping GPS tracking")
         
-        // 🔥 먼저 리스너 제거 (이벤트 전송 중지)
-        removeLocationListener()
-        
-        // 반복 업데이트 중지
         stopRepeatLocationUpdates()
         
-        // 기압계 중지
-        stopBarometer()
-        
-        locationCallback?.let {
-            fusedLocationClient?.removeLocationUpdates(it)
-            Log.d(TAG, "GPS location updates removed")
+        locationCallback?.let { callback ->
+            fusedLocationClient?.removeLocationUpdates(callback)
         }
         locationCallback = null
         
-        // 데이터 초기화
+        stopSensors()
+        resetKalmanFilter()
+        
         lastLocation = null
         isNewLocationAvailable = false
+        lastSendTime = 0
         
         if (isForegroundStarted) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -440,35 +747,66 @@ class LocationService : Service(), SensorEventListener {
                 stopForeground(true)
             }
             isForegroundStarted = false
-            Log.d(TAG, "GPS tracking stopped and notification removed")
+            Log.d(TAG, "✅ GPS tracking stopped")
         }
     }
 
-    fun setLocationListener(listener: (Location, BarometerData?) -> Unit) {
+    fun setLocationListener(listener: (Location, SensorData?) -> Unit) {
         locationListener = listener
-        Log.d(TAG, "Location listener set")
     }
 
     fun removeLocationListener() {
         locationListener = null
-        Log.d(TAG, "Location listener removed")
     }
 
     fun getLastLocation(): Location? = lastLocation
     
-    fun getLastBarometerData(): BarometerData? {
-        return currentPressure?.let { pressure ->
-            BarometerData(
-                pressure = pressure,
-                relativeAltitude = relativeAltitude,
-                enhancedAltitude = enhancedAltitude  // 🆕
-            )
+    fun getLastSensorData(): SensorData? {
+        val barometerData = currentPressure?.let {
+            BarometerData(currentPressure!!, relativeAltitude, enhancedAltitude)
         }
+        
+        val accelerometerData = if (advancedTracking && accelerometerTimestamp > 0) {
+            val magnitude = sqrt(
+                lastAccelerometerData[0] * lastAccelerometerData[0] +
+                lastAccelerometerData[1] * lastAccelerometerData[1] +
+                lastAccelerometerData[2] * lastAccelerometerData[2]
+            )
+            AccelerometerData(
+                lastAccelerometerData[0],
+                lastAccelerometerData[1],
+                lastAccelerometerData[2],
+                magnitude
+            )
+        } else null
+        
+        val gyroscopeData = if (advancedTracking && gyroscopeTimestamp > 0) {
+            val rotationRate = sqrt(
+                lastGyroscopeData[0] * lastGyroscopeData[0] +
+                lastGyroscopeData[1] * lastGyroscopeData[1] +
+                lastGyroscopeData[2] * lastGyroscopeData[2]
+            )
+            GyroscopeData(
+                lastGyroscopeData[0],
+                lastGyroscopeData[1],
+                lastGyroscopeData[2],
+                rotationRate
+            )
+        } else null
+        
+        val motionAnalysis = if (advancedTracking) generateMotionAnalysis() else null
+        
+        return SensorData(barometerData, accelerometerData, gyroscopeData, motionAnalysis)
     }
     
     fun isBarometerAvailable(): Boolean = pressureSensor != null
-
+    fun isAccelerometerAvailable(): Boolean = accelerometerSensor != null
+    fun isGyroscopeAvailable(): Boolean = gyroscopeSensor != null
     fun isTracking(): Boolean = isForegroundStarted
+    fun getExerciseType(): String = exerciseType
+    fun getAdvancedTracking(): Boolean = advancedTracking
+    fun isUsingKalmanFilter(): Boolean = useKalmanFilter
+    fun isKalmanFiltered(): Boolean = useKalmanFilter && isKalmanInitialized
 
     private fun updateNotification() {
         if (isForegroundStarted) {
@@ -480,15 +818,13 @@ class LocationService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "Service onDestroy")
+        Log.d(TAG, "💀 Service onDestroy")
         stopForegroundTracking()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.d(TAG, "⚠️ App task removed - stopping tracking service")
-        
-        // 앱이 종료되면 추적도 중지
+        Log.d(TAG, "⚠️ App task removed")
         stopForegroundTracking()
         stopSelf()
     }

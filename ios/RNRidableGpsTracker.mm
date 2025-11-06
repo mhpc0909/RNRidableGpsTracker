@@ -6,6 +6,7 @@
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
 @property (nonatomic, strong) CLLocationManager *locationManager;
 @property (nonatomic, strong) CMAltimeter *altimeter;
+@property (nonatomic, strong) CMMotionManager *motionManager;
 @property (nonatomic, strong) CLLocation *lastLocation;
 @property (nonatomic, strong) CMAltitudeData *lastAltitudeData;
 @property (nonatomic, assign) BOOL isTracking;
@@ -16,14 +17,39 @@
 @property (nonatomic, strong) NSDate *lastLocationTimestamp;
 @property (nonatomic, assign) BOOL isNewLocationAvailable;
 
-// 🆕 칼만 필터 관련
+// 고도 보정
 @property (nonatomic, assign) double startGpsAltitude;
 @property (nonatomic, assign) BOOL hasStartGpsAltitude;
 @property (nonatomic, assign) double enhancedAltitude;
 
-// 🆕 가중치 (안드로이드와 동일)
-@property (nonatomic, assign) double gpsWeight;
-@property (nonatomic, assign) double barometerWeight;
+// Kalman 필터
+@property (nonatomic, assign) double kalmanLat;
+@property (nonatomic, assign) double kalmanLng;
+@property (nonatomic, assign) double variance;
+@property (nonatomic, assign) BOOL isKalmanInitialized;
+@property (nonatomic, assign) double processNoise;
+@property (nonatomic, assign) BOOL useKalmanFilter;
+
+// 설정
+@property (nonatomic, strong) NSString *exerciseType;
+@property (nonatomic, assign) BOOL advancedTracking;
+
+// 가속계 데이터
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *accelerometerBuffer;
+@property (nonatomic, assign) double lastAccelX;
+@property (nonatomic, assign) double lastAccelY;
+@property (nonatomic, assign) double lastAccelZ;
+@property (nonatomic, assign) NSTimeInterval lastAccelTimestamp;
+
+// 자이로스코프 데이터
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *gyroscopeBuffer;
+@property (nonatomic, assign) double lastGyroX;
+@property (nonatomic, assign) double lastGyroY;
+@property (nonatomic, assign) double lastGyroZ;
+@property (nonatomic, assign) NSTimeInterval lastGyroTimestamp;
+
+@property (nonatomic, assign) NSInteger maxBufferSize;
+
 @end
 
 @implementation RNRidableGpsTracker
@@ -40,11 +66,19 @@ RCT_EXPORT_MODULE()
     if (self = [super init]) {
         [self setupLocationManager];
         [self setupAltimeter];
+        [self setupMotionManager];
         _hasListeners = NO;
         _isNewLocationAvailable = NO;
-        _hasStartGpsAltitude = NO;  // 🆕
-        _gpsWeight = 0.3;  // 🆕 GPS 30%
-        _barometerWeight = 0.7;  // 🆕 기압계 70%
+        _hasStartGpsAltitude = NO;
+        _isKalmanInitialized = NO;
+        _useKalmanFilter = NO;
+        _exerciseType = @"bicycle";
+        _advancedTracking = NO;
+        _variance = 0.0;
+        _processNoise = 0.0;
+        _maxBufferSize = 10;
+        _accelerometerBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
+        _gyroscopeBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
     }
     return self;
 }
@@ -56,22 +90,33 @@ RCT_EXPORT_MODULE()
     self.locationManager.allowsBackgroundLocationUpdates = YES;
     self.locationManager.pausesLocationUpdatesAutomatically = NO;
     self.locationManager.showsBackgroundLocationIndicator = YES;
-    
-    // 🎯 최고 정밀도 설정 (안드로이드와 동일)
-    self.distanceFilter = kCLDistanceFilterNone;  // 모든 이동 감지
-    self.desiredAccuracy = kCLLocationAccuracyBest;  // 최고 정확도
+    self.distanceFilter = kCLDistanceFilterNone;
+    self.desiredAccuracy = kCLLocationAccuracyBest;
     self.locationManager.distanceFilter = self.distanceFilter;
     self.locationManager.desiredAccuracy = self.desiredAccuracy;
+    self.locationManager.activityType = CLActivityTypeFitness;
     
-    // 🚴 사이클링 최적화
-    self.locationManager.activityType = CLActivityTypeFitness;  // 피트니스 활동
-    
-    RCTLogInfo(@"[RNRidableGpsTracker] ✅ Location manager configured with BEST accuracy for cycling");
+    RCTLogInfo(@"[RNRidableGpsTracker] ✅ Location manager configured");
 }
 
 - (void)setupAltimeter
 {
     self.altimeter = [[CMAltimeter alloc] init];
+}
+
+- (void)setupMotionManager
+{
+    self.motionManager = [[CMMotionManager alloc] init];
+    self.motionManager.accelerometerUpdateInterval = 0.02; // 50Hz
+    self.motionManager.gyroUpdateInterval = 0.02;
+    
+    if (self.motionManager.isAccelerometerAvailable) {
+        RCTLogInfo(@"[RNRidableGpsTracker] ✅ Accelerometer available");
+    }
+    
+    if (self.motionManager.isGyroAvailable) {
+        RCTLogInfo(@"[RNRidableGpsTracker] ✅ Gyroscope available");
+    }
 }
 
 - (NSArray<NSString *> *)supportedEvents
@@ -82,13 +127,60 @@ RCT_EXPORT_MODULE()
 - (void)startObserving
 {
     self.hasListeners = YES;
-    RCTLogInfo(@"[RNRidableGpsTracker] ✅ startObserving called - listeners are now active");
+    RCTLogInfo(@"[RNRidableGpsTracker] ✅ startObserving");
 }
 
 - (void)stopObserving
 {
     self.hasListeners = NO;
-    RCTLogInfo(@"[RNRidableGpsTracker] stopObserving called - listeners are now inactive");
+    RCTLogInfo(@"[RNRidableGpsTracker] stopObserving");
+}
+
+#pragma mark - Kalman Filter
+
+- (void)initKalmanFilter:(CLLocation *)location
+{
+    self.kalmanLat = location.coordinate.latitude;
+    self.kalmanLng = location.coordinate.longitude;
+    self.variance = location.horizontalAccuracy * location.horizontalAccuracy;
+    self.isKalmanInitialized = YES;
+    
+    RCTLogInfo(@"[KalmanFilter] Initialized: lat=%.6f, lng=%.6f, variance=%.2f",
+               self.kalmanLat, self.kalmanLng, self.variance);
+}
+
+- (CLLocation *)applyKalmanFilter:(CLLocation *)newLocation
+{
+    if (!self.isKalmanInitialized) {
+        [self initKalmanFilter:newLocation];
+        return newLocation;
+    }
+    
+    double measurementNoise = newLocation.horizontalAccuracy * newLocation.horizontalAccuracy;
+    double predictedVariance = self.variance + self.processNoise;
+    double kalmanGain = predictedVariance / (predictedVariance + measurementNoise);
+    
+    self.kalmanLat = self.kalmanLat + kalmanGain * (newLocation.coordinate.latitude - self.kalmanLat);
+    self.kalmanLng = self.kalmanLng + kalmanGain * (newLocation.coordinate.longitude - self.kalmanLng);
+    self.variance = (1.0 - kalmanGain) * predictedVariance;
+    
+    CLLocationCoordinate2D filteredCoordinate = CLLocationCoordinate2DMake(self.kalmanLat, self.kalmanLng);
+    CLLocation *filteredLocation = [[CLLocation alloc] initWithCoordinate:filteredCoordinate
+                                                                 altitude:newLocation.altitude
+                                                       horizontalAccuracy:sqrt(self.variance)
+                                                         verticalAccuracy:newLocation.verticalAccuracy
+                                                                   course:newLocation.course
+                                                                    speed:newLocation.speed
+                                                                timestamp:newLocation.timestamp];
+    
+    return filteredLocation;
+}
+
+- (void)resetKalmanFilter
+{
+    self.isKalmanInitialized = NO;
+    self.variance = 0.0;
+    RCTLogInfo(@"[KalmanFilter] Reset");
 }
 
 RCT_EXPORT_METHOD(configure:(NSDictionary *)config
@@ -124,32 +216,44 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
         self.locationManager.pausesLocationUpdatesAutomatically = [config[@"pausesLocationUpdatesAutomatically"] boolValue];
     }
     
-    // 🆕 exerciseType 처리
+    if (config[@"advancedTracking"]) {
+        self.advancedTracking = [config[@"advancedTracking"] boolValue];
+    } else {
+        self.advancedTracking = NO;
+    }
+    
     if (config[@"exerciseType"]) {
         NSString *exerciseType = config[@"exerciseType"];
+        self.exerciseType = exerciseType;
         
         if ([exerciseType isEqualToString:@"bicycle"]) {
-            // 자전거 설정
             self.locationManager.activityType = CLActivityTypeFitness;
-            // 필요한 추가 설정
+            self.useKalmanFilter = NO;
+            self.processNoise = 0.0;
+            RCTLogInfo(@"[Config] 🚴 Bicycle: Kalman OFF, Advanced=%d", self.advancedTracking);
+            
         } else if ([exerciseType isEqualToString:@"running"]) {
-            // 러닝 설정
             self.locationManager.activityType = CLActivityTypeFitness;
+            self.useKalmanFilter = YES;
+            self.processNoise = 0.5;
+            RCTLogInfo(@"[Config] 🏃 Running: Kalman ON (light), Advanced=%d", self.advancedTracking);
+            
         } else if ([exerciseType isEqualToString:@"hiking"]) {
-            // 하이킹 설정
             self.locationManager.activityType = CLActivityTypeFitness;
+            self.useKalmanFilter = YES;
+            self.processNoise = 1.0;
+            RCTLogInfo(@"[Config] 🥾 Hiking: Kalman ON (medium), Advanced=%d", self.advancedTracking);
+            
         } else if ([exerciseType isEqualToString:@"walking"]) {
-            // 걷기 설정
             self.locationManager.activityType = CLActivityTypeFitness;
-        }
-        
-        // 기본값 처리 (없으면 bicycle)
-        if (!exerciseType) {
-            exerciseType = @"bicycle";
+            self.useKalmanFilter = YES;
+            self.processNoise = 2.0;
+            RCTLogInfo(@"[Config] 🚶 Walking: Kalman ON (strong), Advanced=%d", self.advancedTracking);
         }
     } else {
-        // 기본값: bicycle
+        self.exerciseType = @"bicycle";
         self.locationManager.activityType = CLActivityTypeFitness;
+        self.useKalmanFilter = NO;
     }
     
     resolve(nil);
@@ -170,15 +274,21 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
         return;
     }
     
-    RCTLogInfo(@"[RNRidableGpsTracker] Starting GPS tracking with BEST accuracy, hasListeners: %d", self.hasListeners);
+    RCTLogInfo(@"[RNRidableGpsTracker] 🚀 Starting: %@ (Advanced: %d)", self.exerciseType, self.advancedTracking);
     
-    // 짧은 대기 시간 후 시작 (JS 리스너 등록 완료 보장)
+    [self resetKalmanFilter];
+    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.isTracking = YES;
         [self.locationManager startUpdatingLocation];
         [self startAltimeterUpdates];
+        
+        if (self.advancedTracking) {
+            [self startAdvancedSensors];
+        }
+        
         [self startRepeatLocationUpdates];
-        RCTLogInfo(@"[RNRidableGpsTracker] ✅ GPS tracking started, hasListeners: %d", self.hasListeners);
+        RCTLogInfo(@"[RNRidableGpsTracker] ✅ Tracking started");
         resolve(nil);
     });
 }
@@ -189,8 +299,11 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
     self.isTracking = NO;
     [self.locationManager stopUpdatingLocation];
     [self stopAltimeterUpdates];
+    [self stopAdvancedSensors];
     [self stopRepeatLocationUpdates];
-    RCTLogInfo(@"[RNRidableGpsTracker] GPS tracking stopped");
+    [self resetKalmanFilter];
+    
+    RCTLogInfo(@"[RNRidableGpsTracker] 🛑 Tracking stopped");
     resolve(nil);
 }
 
@@ -241,7 +354,12 @@ RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
         @"isAuthorized": @(authStatus == kCLAuthorizationStatusAuthorizedAlways || 
                           authStatus == kCLAuthorizationStatusAuthorizedWhenInUse),
         @"authorizationStatus": status,
-        @"isBarometerAvailable": @([CMAltimeter isRelativeAltitudeAvailable])
+        @"isBarometerAvailable": @([CMAltimeter isRelativeAltitudeAvailable]),
+        @"isAccelerometerAvailable": @(self.motionManager.isAccelerometerAvailable),
+        @"isGyroscopeAvailable": @(self.motionManager.isGyroAvailable),
+        @"exerciseType": self.exerciseType,
+        @"advancedTracking": @(self.advancedTracking),
+        @"useKalmanFilter": @(self.useKalmanFilter)
     };
     
     resolve(result);
@@ -279,54 +397,241 @@ RCT_EXPORT_METHOD(openLocationSettings)
 - (void)startAltimeterUpdates
 {
     if (![CMAltimeter isRelativeAltitudeAvailable]) {
-        RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ Barometer not available on this device");
+        RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ Barometer not available");
         return;
     }
     
-    RCTLogInfo(@"[RNRidableGpsTracker] Starting barometer updates with Kalman filter");
-    
-    // 🆕 시작 시 기준점 리셋
     self.hasStartGpsAltitude = NO;
     
     [self.altimeter startRelativeAltitudeUpdatesToQueue:[NSOperationQueue mainQueue]
                                             withHandler:^(CMAltitudeData *altitudeData, NSError *error) {
         if (error) {
-            RCTLogError(@"[RNRidableGpsTracker] Altimeter error: %@", error.localizedDescription);
+            RCTLogError(@"[Altimeter] Error: %@", error.localizedDescription);
             return;
         }
         
         if (altitudeData) {
             self.lastAltitudeData = altitudeData;
             
-            // 🆕 칼만 필터 융합 (GPS와 기압계 데이터 결합)
             if (self.lastLocation && self.hasStartGpsAltitude && self.lastLocation.verticalAccuracy >= 0) {
                 double gpsAltitude = self.lastLocation.altitude;
                 double relativeAltitude = [altitudeData.relativeAltitude doubleValue];
-                
-                // 기압계 기반 절대 고도 = 시작 GPS 고도 + 상대 변화량
                 double barometerAltitude = self.startGpsAltitude + relativeAltitude;
-                
-                // 🎯 칼만 필터: GPS(30%) + 기압계(70%) 가중 평균
-                self.enhancedAltitude = (gpsAltitude * self.gpsWeight) + (barometerAltitude * self.barometerWeight);
-                
-                RCTLogInfo(@"[RNRidableGpsTracker] 📊 Altitude fusion: GPS=%.1fm, Baro=%.1fm, Enhanced=%.1fm",
-                          gpsAltitude, barometerAltitude, self.enhancedAltitude);
+                self.enhancedAltitude = (gpsAltitude * 0.3) + (barometerAltitude * 0.7);
             }
-            
-            RCTLogInfo(@"[RNRidableGpsTracker] Barometer update: relativeAltitude=%.2fm, pressure=%.2fkPa",
-                       [altitudeData.relativeAltitude doubleValue],
-                       [altitudeData.pressure doubleValue]);
         }
     }];
+    
+    RCTLogInfo(@"[RNRidableGpsTracker] 📊 Barometer started");
 }
 
 - (void)stopAltimeterUpdates
 {
     [self.altimeter stopRelativeAltitudeUpdates];
     self.lastAltitudeData = nil;
-    self.hasStartGpsAltitude = NO;  // 🆕 리셋
-    self.enhancedAltitude = 0.0;  // 🆕 리셋
-    RCTLogInfo(@"[RNRidableGpsTracker] Stopped barometer updates");
+    self.hasStartGpsAltitude = NO;
+    self.enhancedAltitude = 0.0;
+    RCTLogInfo(@"[RNRidableGpsTracker] Barometer stopped");
+}
+
+#pragma mark - Advanced Sensors
+
+- (void)startAdvancedSensors
+{
+    if (!self.advancedTracking) return;
+    
+    if (self.motionManager.isAccelerometerAvailable) {
+        [self.accelerometerBuffer removeAllObjects];
+        
+        [self.motionManager startAccelerometerUpdatesToQueue:[NSOperationQueue mainQueue]
+                                                  withHandler:^(CMAccelerometerData *data, NSError *error) {
+            if (error) {
+                RCTLogError(@"[Accelerometer] Error: %@", error.localizedDescription);
+                return;
+            }
+            
+            if (data) {
+                self.lastAccelX = data.acceleration.x * 9.81;
+                self.lastAccelY = data.acceleration.y * 9.81;
+                self.lastAccelZ = data.acceleration.z * 9.81;
+                self.lastAccelTimestamp = [[NSDate date] timeIntervalSince1970];
+                
+                NSDictionary *reading = @{
+                    @"x": @(self.lastAccelX),
+                    @"y": @(self.lastAccelY),
+                    @"z": @(self.lastAccelZ),
+                    @"timestamp": @(self.lastAccelTimestamp)
+                };
+                
+                [self.accelerometerBuffer addObject:reading];
+                
+                if (self.accelerometerBuffer.count > self.maxBufferSize) {
+                    [self.accelerometerBuffer removeObjectAtIndex:0];
+                }
+            }
+        }];
+        
+        RCTLogInfo(@"[RNRidableGpsTracker] 📊 Accelerometer started");
+    }
+    
+    if (self.motionManager.isGyroAvailable) {
+        [self.gyroscopeBuffer removeAllObjects];
+        
+        [self.motionManager startGyroUpdatesToQueue:[NSOperationQueue mainQueue]
+                                        withHandler:^(CMGyroData *data, NSError *error) {
+            if (error) {
+                RCTLogError(@"[Gyroscope] Error: %@", error.localizedDescription);
+                return;
+            }
+            
+            if (data) {
+                self.lastGyroX = data.rotationRate.x;
+                self.lastGyroY = data.rotationRate.y;
+                self.lastGyroZ = data.rotationRate.z;
+                self.lastGyroTimestamp = [[NSDate date] timeIntervalSince1970];
+                
+                NSDictionary *reading = @{
+                    @"x": @(self.lastGyroX),
+                    @"y": @(self.lastGyroY),
+                    @"z": @(self.lastGyroZ),
+                    @"timestamp": @(self.lastGyroTimestamp)
+                };
+                
+                [self.gyroscopeBuffer addObject:reading];
+                
+                if (self.gyroscopeBuffer.count > self.maxBufferSize) {
+                    [self.gyroscopeBuffer removeObjectAtIndex:0];
+                }
+            }
+        }];
+        
+        RCTLogInfo(@"[RNRidableGpsTracker] 📊 Gyroscope started");
+    }
+}
+
+- (void)stopAdvancedSensors
+{
+    if (self.motionManager.isAccelerometerActive) {
+        [self.motionManager stopAccelerometerUpdates];
+        [self.accelerometerBuffer removeAllObjects];
+        RCTLogInfo(@"[RNRidableGpsTracker] Accelerometer stopped");
+    }
+    
+    if (self.motionManager.isGyroActive) {
+        [self.motionManager stopGyroUpdates];
+        [self.gyroscopeBuffer removeAllObjects];
+        RCTLogInfo(@"[RNRidableGpsTracker] Gyroscope stopped");
+    }
+}
+
+#pragma mark - Motion Analysis
+
+- (NSDictionary *)generateMotionAnalysis
+{
+    if (!self.advancedTracking || self.accelerometerBuffer.count == 0) {
+        return nil;
+    }
+    
+    // 1. 진동 강도 계산
+    double vibrationIntensity = [self calculateVibrationIntensity];
+    NSString *roadSurfaceQuality;
+    
+    if (vibrationIntensity < 0.2) {
+        roadSurfaceQuality = @"smooth";
+    } else if (vibrationIntensity < 0.5) {
+        roadSurfaceQuality = @"rough";
+    } else {
+        roadSurfaceQuality = @"very_rough";
+    }
+    
+    // 2. 코너링 강도
+    double corneringIntensity = 0.0;
+    if (self.gyroscopeBuffer.count > 0) {
+        double totalRotZ = 0.0;
+        for (NSDictionary *reading in self.gyroscopeBuffer) {
+            totalRotZ += fabs([reading[@"z"] doubleValue]);
+        }
+        double avgRotationZ = totalRotZ / self.gyroscopeBuffer.count;
+        corneringIntensity = MIN(avgRotationZ / 3.0, 1.0);
+    }
+    
+    // 3. 경사도 분석
+    NSDictionary *inclineData = [self calculateIncline];
+    
+    // 4. 수직 가속도 (iOS 좌표계 고려)
+    double verticalAcceleration = fabs(self.lastAccelZ) - 9.81;
+    
+    return @{
+        @"roadSurfaceQuality": roadSurfaceQuality,
+        @"vibrationIntensity": @(vibrationIntensity),
+        @"corneringIntensity": @(corneringIntensity),
+        @"inclineAngle": inclineData[@"angle"],
+        @"isClimbing": inclineData[@"isClimbing"],
+        @"isDescending": inclineData[@"isDescending"],
+        @"verticalAcceleration": @(verticalAcceleration)
+    };
+}
+
+- (double)calculateVibrationIntensity
+{
+    if (self.accelerometerBuffer.count < 2) return 0.0;
+    
+    double totalVariation = 0.0;
+    
+    for (NSInteger i = 1; i < self.accelerometerBuffer.count; i++) {
+        NSDictionary *prev = self.accelerometerBuffer[i - 1];
+        NSDictionary *curr = self.accelerometerBuffer[i];
+        
+        double dx = [curr[@"x"] doubleValue] - [prev[@"x"] doubleValue];
+        double dy = [curr[@"y"] doubleValue] - [prev[@"y"] doubleValue];
+        double dz = [curr[@"z"] doubleValue] - [prev[@"z"] doubleValue];
+        
+        totalVariation += sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    
+    double avgVariation = totalVariation / (self.accelerometerBuffer.count - 1);
+    
+    return MAX(0.0, MIN(1.0, (avgVariation - 0.5) / 2.5));
+}
+
+- (NSDictionary *)calculateIncline
+{
+    if (self.accelerometerBuffer.count == 0) {
+        return @{
+            @"angle": @0.0,
+            @"isClimbing": @NO,
+            @"isDescending": @NO
+        };
+    }
+    
+    // 평균 계산
+    double sumX = 0, sumY = 0, sumZ = 0;
+    for (NSDictionary *reading in self.accelerometerBuffer) {
+        sumX += [reading[@"x"] doubleValue];
+        sumY += [reading[@"y"] doubleValue];
+        sumZ += [reading[@"z"] doubleValue];
+    }
+    
+    double avgX = sumX / self.accelerometerBuffer.count;
+    double avgY = sumY / self.accelerometerBuffer.count;
+    double avgZ = sumZ / self.accelerometerBuffer.count;
+    
+    // 🔧 경사각 계산 수정
+    // iOS 좌표계: 기기를 수평으로 놓았을 때 Z ≈ -9.81 (아래 방향)
+    // pitch angle (앞뒤 기울기) 계산
+    double pitchAngle = atan2(avgY, sqrt(avgX * avgX + avgZ * avgZ)) * 180.0 / M_PI;
+    
+    // 각도 범위 제한 (-90 ~ 90)
+    pitchAngle = fmax(-90.0, fmin(90.0, pitchAngle));
+    
+    BOOL isClimbing = pitchAngle > 5.0;
+    BOOL isDescending = pitchAngle < -5.0;
+    
+    return @{
+        @"angle": @(pitchAngle),
+        @"isClimbing": @(isClimbing),
+        @"isDescending": @(isDescending)
+    };
 }
 
 #pragma mark - CLLocationManagerDelegate
@@ -336,42 +641,37 @@ RCT_EXPORT_METHOD(openLocationSettings)
     CLLocation *location = locations.lastObject;
     if (!location) return;
     
-    // 🆕 첫 GPS 고도를 기준점으로 설정 (수직 정확도가 유효할 때만)
-    if (!self.hasStartGpsAltitude && location.verticalAccuracy >= 0) {
-        self.startGpsAltitude = location.altitude;
-        self.enhancedAltitude = self.startGpsAltitude;
-        self.hasStartGpsAltitude = YES;
-        RCTLogInfo(@"[RNRidableGpsTracker] 🎯 Start GPS altitude set: %.1fm (accuracy: %.1fm)", 
-                   self.startGpsAltitude, location.verticalAccuracy);
+    CLLocation *processedLocation = location;
+    if (self.useKalmanFilter) {
+        processedLocation = [self applyKalmanFilter:location];
     }
     
-    self.lastLocation = location;
-    self.lastLocationTimestamp = location.timestamp;
-    self.isNewLocationAvailable = YES;  // 새로운 위치 수신
+    if (!self.hasStartGpsAltitude && processedLocation.verticalAccuracy >= 0) {
+        self.startGpsAltitude = processedLocation.altitude;
+        self.enhancedAltitude = self.startGpsAltitude;
+        self.hasStartGpsAltitude = YES;
+        RCTLogInfo(@"[RNRidableGpsTracker] 🎯 Start altitude: %.1fm", self.startGpsAltitude);
+    }
     
-    RCTLogInfo(@"[RNRidableGpsTracker] 🆕 NEW Location update: lat=%.6f, lng=%.6f, alt=%.1fm, accuracy=%.1fm, tracking=%d, hasListeners=%d",
-               location.coordinate.latitude, location.coordinate.longitude, location.altitude, 
-               location.horizontalAccuracy, self.isTracking, self.hasListeners);
+    self.lastLocation = processedLocation;
+    self.lastLocationTimestamp = processedLocation.timestamp;
+    self.isNewLocationAvailable = YES;
     
     if (self.isTracking && self.hasListeners) {
-        [self sendEventWithName:@"location" body:[self convertLocationToDict:location withNewFlag:YES]];
-        self.isNewLocationAvailable = NO;  // 전송 후 플래그 리셋
-    } else if (self.isTracking && !self.hasListeners) {
-        RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ Location update received but no listeners registered");
+        [self sendEventWithName:@"location" body:[self convertLocationToDict:processedLocation withNewFlag:YES]];
+        self.isNewLocationAvailable = NO;
     }
 }
 
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error
 {
-    RCTLogError(@"[RNRidableGpsTracker] Location manager failed: %@", error.localizedDescription);
+    RCTLogError(@"[RNRidableGpsTracker] Location error: %@", error.localizedDescription);
     
     if (self.hasListeners) {
         [self sendEventWithName:@"error" body:@{
             @"code": @(error.code),
             @"message": error.localizedDescription
         }];
-    } else {
-        RCTLogWarn(@"[RNRidableGpsTracker] Error occurred but no listeners registered");
     }
 }
 
@@ -384,7 +684,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
         status = [CLLocationManager authorizationStatus];
     }
     
-    RCTLogInfo(@"[RNRidableGpsTracker] Authorization status changed: %d", (int)status);
+    RCTLogInfo(@"[RNRidableGpsTracker] Authorization changed: %d", (int)status);
     
     if (self.hasListeners) {
         NSString *statusString;
@@ -409,11 +709,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
                 break;
         }
         
-        [self sendEventWithName:@"authorizationChanged" body:@{
-            @"status": statusString
-        }];
-    } else {
-        RCTLogWarn(@"[RNRidableGpsTracker] Authorization changed but no listeners registered");
+        [self sendEventWithName:@"authorizationChanged" body:@{@"status": statusString}];
     }
 }
 
@@ -423,9 +719,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
 {
     [self stopRepeatLocationUpdates];
     
-    RCTLogInfo(@"[RNRidableGpsTracker] Starting repeat location updates (1 second interval)");
-    
-    // 메인 스레드에서 타이머 생성
     dispatch_async(dispatch_get_main_queue(), ^{
         self.repeatLocationTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                                     target:self
@@ -441,25 +734,19 @@ RCT_EXPORT_METHOD(openLocationSettings)
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.repeatLocationTimer invalidate];
             self.repeatLocationTimer = nil;
-            RCTLogInfo(@"[RNRidableGpsTracker] Stopped repeat location updates");
         });
     }
 }
 
 - (void)repeatLocationUpdate:(NSTimer *)timer
 {
-    // 마지막 위치가 있고 트래킹 중이며 리스너가 있으면 1초마다 전송
     if (self.lastLocation && self.isTracking && self.hasListeners) {
-        // isNewLocationAvailable이 YES이면 새 데이터, NO이면 반복 데이터
         BOOL isNew = self.isNewLocationAvailable;
         [self sendEventWithName:@"location" body:[self convertLocationToDict:self.lastLocation withNewFlag:isNew]];
         
         if (isNew) {
-            self.isNewLocationAvailable = NO;  // 전송 후 플래그 리셋
-            RCTLogInfo(@"[RNRidableGpsTracker] 🆕 Sent NEW location data");
+            self.isNewLocationAvailable = NO;
         }
-    } else if (self.lastLocation && self.isTracking && !self.hasListeners) {
-        RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ Repeat location update skipped - no listeners registered");
     }
 }
 
@@ -470,27 +757,58 @@ RCT_EXPORT_METHOD(openLocationSettings)
     NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithDictionary:@{
         @"latitude": @(location.coordinate.latitude),
         @"longitude": @(location.coordinate.longitude),
-        @"altitude": @(location.altitude),  // GPS 기반 고도
+        @"altitude": @(location.altitude),
         @"accuracy": @(location.horizontalAccuracy),
         @"speed": @(location.speed >= 0 ? location.speed : 0),
         @"bearing": @(location.course >= 0 ? location.course : 0),
         @"timestamp": @([location.timestamp timeIntervalSince1970] * 1000),
-        @"isNewLocation": @(isNew)  // 🆕 새 위치 데이터 여부
+        @"isNewLocation": @(isNew),
+        @"isKalmanFiltered": @(self.useKalmanFilter && self.isKalmanInitialized)
     }];
     
-    // 🆕 기압계 데이터가 있으면 enhancedAltitude 추가
+    // 기압계 데이터
     if (self.lastAltitudeData && self.hasStartGpsAltitude) {
         double relativeAltitude = [self.lastAltitudeData.relativeAltitude doubleValue];
         double pressure = [self.lastAltitudeData.pressure doubleValue];
         
-        // 🎯 칼만 필터로 융합된 고도 사용
         dict[@"enhancedAltitude"] = @(self.enhancedAltitude);
-        dict[@"relativeAltitude"] = @(relativeAltitude);  // 시작점 대비 상대 고도
-        dict[@"pressure"] = @(pressure);  // 기압 (kPa)
+        dict[@"relativeAltitude"] = @(relativeAltitude);
+        dict[@"pressure"] = @(pressure);
+    }
+    
+    // 가속계 데이터
+    if (self.advancedTracking && self.lastAccelTimestamp > 0) {
+        double magnitude = sqrt(self.lastAccelX * self.lastAccelX + 
+                               self.lastAccelY * self.lastAccelY + 
+                               self.lastAccelZ * self.lastAccelZ);
         
-        if (isNew) {
-            RCTLogInfo(@"[RNRidableGpsTracker] Enhanced altitude: GPS=%.2fm, relative=%.2fm, enhanced=%.2fm, pressure=%.2fkPa",
-                       location.altitude, relativeAltitude, self.enhancedAltitude, pressure);
+        dict[@"accelerometer"] = @{
+            @"x": @(self.lastAccelX),
+            @"y": @(self.lastAccelY),
+            @"z": @(self.lastAccelZ),
+            @"magnitude": @(magnitude)
+        };
+    }
+    
+    // 자이로스코프 데이터
+    if (self.advancedTracking && self.lastGyroTimestamp > 0) {
+        double rotationRate = sqrt(self.lastGyroX * self.lastGyroX + 
+                                   self.lastGyroY * self.lastGyroY + 
+                                   self.lastGyroZ * self.lastGyroZ);
+        
+        dict[@"gyroscope"] = @{
+            @"x": @(self.lastGyroX),
+            @"y": @(self.lastGyroY),
+            @"z": @(self.lastGyroZ),
+            @"rotationRate": @(rotationRate)
+        };
+    }
+    
+    // 운동 분석 데이터
+    if (self.advancedTracking) {
+        NSDictionary *motionAnalysis = [self generateMotionAnalysis];
+        if (motionAnalysis) {
+            dict[@"motionAnalysis"] = motionAnalysis;
         }
     }
     

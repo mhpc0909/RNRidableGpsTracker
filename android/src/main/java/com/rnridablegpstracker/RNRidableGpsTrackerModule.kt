@@ -8,7 +8,9 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -23,21 +25,22 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
     private var locationService: LocationService? = null
     private var serviceBound = false
     private var lastLocationTimestamp: Long = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
     
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            Log.d(TAG, "Service connected")
+            Log.d(TAG, "✅ Service connected")
             val binder = service as LocationService.LocalBinder
             locationService = binder.getService()
             serviceBound = true
             
-            locationService?.setLocationListener { location, barometerData ->
-                sendLocationEvent(location, barometerData)
+            locationService?.setLocationListener { location, sensorData ->
+                sendLocationEvent(location, sensorData)
             }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            Log.d(TAG, "Service disconnected")
+            Log.d(TAG, "⚠️ Service disconnected")
             locationService = null
             serviceBound = false
         }
@@ -63,9 +66,9 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 serviceConnection,
                 Context.BIND_AUTO_CREATE
             )
-            Log.d(TAG, "Binding to LocationService")
+            Log.d(TAG, "🔗 Binding to LocationService")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to bind LocationService", e)
+            Log.e(TAG, "❌ Failed to bind LocationService", e)
         }
     }
 
@@ -87,41 +90,28 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 config.getString("desiredAccuracy") ?: "high"
             } else "high"
 
-            // 🆕 exerciseType 처리
             val exerciseType = if (config.hasKey("exerciseType")) {
                 config.getString("exerciseType") ?: "bicycle"
-            } else {
-                "bicycle"  // 기본값
-            }
+            } else "bicycle"
             
-            when (exerciseType) {
-                "bicycle" -> {
-                    // 자전거 설정
-                    // 필요한 설정 적용
-                }
-                "running" -> {
-                    // 러닝 설정
-                }
-                "hiking" -> {
-                    // 하이킹 설정
-                }
-                "walking" -> {
-                    // 걷기 설정
-                }
-            }
+            // 🆕 advancedTracking 처리
+            val advancedTracking = if (config.hasKey("advancedTracking")) {
+                config.getBoolean("advancedTracking")
+            } else false
 
             locationService?.configure(
                 distanceFilter,
                 interval,
                 fastestInterval,
                 desiredAccuracy,
-                exerciseType  // 🆕 exerciseType 전달
+                exerciseType,
+                advancedTracking
             )
 
-            Log.d(TAG, "Configuration applied with exerciseType: $exerciseType")
+            Log.d(TAG, "⚙️ Configuration: exerciseType=$exerciseType, advanced=$advancedTracking")
             promise.resolve(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to configure", e)
+            Log.e(TAG, "❌ Failed to configure", e)
             promise.reject("CONFIGURE_ERROR", e.message, e)
         }
     }
@@ -133,22 +123,53 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 return
             }
 
-            if (locationService == null) {
-                bindLocationService()
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    startTracking(promise)
-                }, 500)
+            if (locationService?.isTracking() == true) {
+                Log.d(TAG, "⚠️ Already tracking, stopping first...")
+                locationService?.stopForegroundTracking()
+                
+                mainHandler.postDelayed({
+                    startTrackingInternal(promise)
+                }, 200)
             } else {
-                startTracking(promise)
+                if (locationService == null || !serviceBound) {
+                    Log.d(TAG, "🔗 Service not bound, binding first...")
+                    bindLocationService()
+                    waitForServiceBinding(promise)
+                } else {
+                    startTrackingInternal(promise)
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start", e)
+            Log.e(TAG, "❌ Failed to start", e)
             promise.reject("START_ERROR", e.message, e)
         }
     }
 
-    private fun startTracking(promise: Promise) {
+    private fun waitForServiceBinding(promise: Promise, maxAttempts: Int = 20, attempt: Int = 0) {
+        if (serviceBound && locationService != null) {
+            Log.d(TAG, "✅ Service bound after $attempt attempts")
+            startTrackingInternal(promise)
+        } else if (attempt < maxAttempts) {
+            mainHandler.postDelayed({
+                waitForServiceBinding(promise, maxAttempts, attempt + 1)
+            }, 100)
+        } else {
+            Log.e(TAG, "❌ Service binding timeout")
+            promise.reject("SERVICE_BINDING_ERROR", "Failed to bind LocationService within timeout")
+        }
+    }
+
+    private fun startTrackingInternal(promise: Promise) {
         try {
+            if (locationService == null) {
+                promise.reject("SERVICE_NOT_AVAILABLE", "LocationService is not bound")
+                return
+            }
+
+            locationService?.setLocationListener { location, sensorData ->
+                sendLocationEvent(location, sensorData)
+            }
+
             val intent = Intent(reactApplicationContext, LocationService::class.java).apply {
                 action = LocationService.ACTION_START
             }
@@ -160,25 +181,29 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             }
 
             locationService?.startForegroundTracking()
-            Log.d(TAG, "Tracking started")
+            
+            Log.d(TAG, "✅ Tracking started successfully")
             promise.resolve(null)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "❌ Security exception", e)
+            promise.reject("SECURITY_ERROR", e.message, e)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start tracking", e)
+            Log.e(TAG, "❌ Failed to start tracking", e)
             promise.reject("START_TRACKING_ERROR", e.message, e)
         }
     }
 
     override fun stop(promise: Promise) {
         try {
+            Log.d(TAG, "🛑 Stopping tracking...")
+            
+            locationService?.removeLocationListener()
             locationService?.stopForegroundTracking()
             
-            val intent = Intent(reactApplicationContext, LocationService::class.java)
-            reactApplicationContext.stopService(intent)
-            
-            Log.d(TAG, "Tracking stopped")
+            Log.d(TAG, "✅ Tracking stopped")
             promise.resolve(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to stop", e)
+            Log.e(TAG, "❌ Failed to stop", e)
             promise.reject("STOP_ERROR", e.message, e)
         }
     }
@@ -186,15 +211,15 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
     override fun getCurrentLocation(promise: Promise) {
         try {
             val location = locationService?.getLastLocation()
-            val barometerData = locationService?.getLastBarometerData()
+            val sensorData = locationService?.getLastSensorData()
             
             if (location != null) {
-                promise.resolve(convertLocationToMap(location, barometerData, isNew = false))
+                promise.resolve(convertLocationToMap(location, sensorData, isNew = false))
             } else {
                 promise.reject("NO_LOCATION", "No location available")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get current location", e)
+            Log.e(TAG, "❌ Failed to get current location", e)
             promise.reject("GET_LOCATION_ERROR", e.message, e)
         }
     }
@@ -206,10 +231,16 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 putBoolean("isAuthorized", hasLocationPermission())
                 putString("authorizationStatus", getAuthorizationStatus())
                 putBoolean("isBarometerAvailable", locationService?.isBarometerAvailable() ?: false)
+                putBoolean("isAccelerometerAvailable", locationService?.isAccelerometerAvailable() ?: false)
+                putBoolean("isGyroscopeAvailable", locationService?.isGyroscopeAvailable() ?: false)
+                putBoolean("isServiceBound", serviceBound)
+                putString("exerciseType", locationService?.getExerciseType() ?: "unknown")
+                putBoolean("advancedTracking", locationService?.getAdvancedTracking() ?: false)
+                putBoolean("isKalmanEnabled", locationService?.isUsingKalmanFilter() ?: false)
             }
             promise.resolve(status)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to check status", e)
+            Log.e(TAG, "❌ Failed to check status", e)
             promise.reject("CHECK_STATUS_ERROR", e.message, e)
         }
     }
@@ -225,24 +256,24 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             }
             reactApplicationContext.startActivity(intent)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to open settings", e)
+            Log.e(TAG, "❌ Failed to open settings", e)
         }
     }
 
     override fun addListener(eventName: String) {
-        Log.d(TAG, "Listener added: $eventName")
+        Log.d(TAG, "👂 Listener added: $eventName")
     }
 
     override fun removeListeners(count: Double) {
-        Log.d(TAG, "Removing $count listeners")
+        Log.d(TAG, "🔇 Removing $count listeners")
     }
 
     override fun enableListeners() {
-        Log.d(TAG, "enableListeners called")
+        Log.d(TAG, "🔊 enableListeners called")
     }
 
     override fun disableListeners() {
-        Log.d(TAG, "disableListeners called")
+        Log.d(TAG, "🔇 disableListeners called")
     }
 
     private fun hasLocationPermission(): Boolean {
@@ -269,31 +300,71 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
 
     private fun convertLocationToMap(
         location: Location, 
-        barometerData: LocationService.BarometerData?,
+        sensorData: LocationService.SensorData?,
         isNew: Boolean
     ): WritableMap {
         return Arguments.createMap().apply {
+            // 기본 GPS 데이터
             putDouble("latitude", location.latitude)
             putDouble("longitude", location.longitude)
-            putDouble("altitude", location.altitude)  // GPS 기반 고도
+            putDouble("altitude", location.altitude)
             putDouble("accuracy", location.accuracy.toDouble())
             putDouble("speed", if (location.hasSpeed()) location.speed.toDouble() else 0.0)
             putDouble("bearing", if (location.hasBearing()) location.bearing.toDouble() else 0.0)
             putDouble("timestamp", location.time.toDouble())
-            putBoolean("isNewLocation", isNew)  // 🆕 새 위치 데이터 여부
+            putBoolean("isNewLocation", isNew)
+            putBoolean("isKalmanFiltered", locationService?.isKalmanFiltered() ?: false)
             
-            // 기압계 데이터 추가
-            barometerData?.let { data ->
-                putDouble("enhancedAltitude", data.enhancedAltitude.toDouble())  // 보정된 고도
-                putDouble("relativeAltitude", data.relativeAltitude.toDouble())  // 상대 고도
-                putDouble("pressure", data.pressure.toDouble())  // 기압 (hPa)
+            // 🆕 센서 데이터
+            sensorData?.let { data ->
+                // 기압계 데이터
+                data.barometer?.let { baro ->
+                    putDouble("enhancedAltitude", baro.enhancedAltitude.toDouble())
+                    putDouble("relativeAltitude", baro.relativeAltitude.toDouble())
+                    putDouble("pressure", baro.pressure.toDouble())
+                }
+                
+                // 🆕 가속계 데이터
+                data.accelerometer?.let { accel ->
+                    val accelMap = Arguments.createMap().apply {
+                        putDouble("x", accel.x.toDouble())
+                        putDouble("y", accel.y.toDouble())
+                        putDouble("z", accel.z.toDouble())
+                        putDouble("magnitude", accel.magnitude.toDouble())
+                    }
+                    putMap("accelerometer", accelMap)
+                }
+                
+                // 🆕 자이로스코프 데이터
+                data.gyroscope?.let { gyro ->
+                    val gyroMap = Arguments.createMap().apply {
+                        putDouble("x", gyro.x.toDouble())
+                        putDouble("y", gyro.y.toDouble())
+                        putDouble("z", gyro.z.toDouble())
+                        putDouble("rotationRate", gyro.rotationRate.toDouble())
+                    }
+                    putMap("gyroscope", gyroMap)
+                }
+                
+                // 🆕 운동 분석 데이터
+                data.motionAnalysis?.let { motion ->
+                    val motionMap = Arguments.createMap().apply {
+                        putString("roadSurfaceQuality", motion.roadSurfaceQuality)
+                        putDouble("vibrationIntensity", motion.vibrationIntensity.toDouble())
+                        putDouble("corneringIntensity", motion.corneringIntensity.toDouble())
+                        putDouble("inclineAngle", motion.inclineAngle.toDouble())
+                        putBoolean("isClimbing", motion.isClimbing)
+                        putBoolean("isDescending", motion.isDescending)
+                        putDouble("verticalAcceleration", motion.verticalAcceleration.toDouble())
+                    }
+                    putMap("motionAnalysis", motionMap)
+                }
             }
         }
     }
 
-    private fun sendLocationEvent(location: Location, barometerData: LocationService.BarometerData?) {
+    private fun sendLocationEvent(location: Location, sensorData: LocationService.SensorData?) {
         try {
-            // 새로운 위치인지 확인 (timestamp 비교)
             val isNew = location.time != lastLocationTimestamp
             if (isNew) {
                 lastLocationTimestamp = location.time
@@ -301,21 +372,25 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit("location", convertLocationToMap(location, barometerData, isNew))
+                .emit("location", convertLocationToMap(location, sensorData, isNew))
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send location event", e)
+            Log.e(TAG, "❌ Failed to send location event", e)
         }
     }
 
     override fun onCatalystInstanceDestroy() {
         super.onCatalystInstanceDestroy()
         try {
+            Log.d(TAG, "💀 Catalyst instance destroy")
+            
+            locationService?.removeLocationListener()
+            
             if (serviceBound) {
                 reactApplicationContext.unbindService(serviceConnection)
                 serviceBound = false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error unbinding service", e)
+            Log.e(TAG, "❌ Error during cleanup", e)
         }
     }
 }

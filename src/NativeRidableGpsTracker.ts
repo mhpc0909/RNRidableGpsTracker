@@ -9,6 +9,7 @@ export interface Spec extends TurboModule {
     fastestInterval?: number
     activityType?: string
     exerciseType?: string // 🆕 운동 유형 추가
+    advancedTracking?: boolean // 🆕 고급 추적 모드
     allowsBackgroundLocationUpdates?: boolean
     showsBackgroundLocationIndicator?: boolean
     pausesLocationUpdatesAutomatically?: boolean
@@ -21,10 +22,15 @@ export interface Spec extends TurboModule {
     latitude: number
     longitude: number
     altitude: number
+    enhancedAltitude?: number
+    relativeAltitude?: number
+    pressure?: number
     accuracy: number
     speed: number
     bearing: number
     timestamp: number
+    isNewLocation: boolean
+    isKalmanFiltered?: boolean
   }>
 
   checkStatus(): Promise<{
