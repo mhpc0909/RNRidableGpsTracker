@@ -22,6 +22,8 @@ import com.google.android.gms.location.*
 import kotlin.math.pow
 import kotlin.math.sqrt
 import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.max
 
 class LocationService : Service(), SensorEventListener {
 
@@ -50,24 +52,42 @@ class LocationService : Service(), SensorEventListener {
     private var lastAccelerometerData: FloatArray = FloatArray(3)
     private var accelerometerTimestamp: Long = 0
     private val accelerometerBuffer = mutableListOf<AccelerometerReading>()
-    private val maxBufferSize = 10 // 최근 10개 데이터
+    private val maxBufferSize = 10
     
     // 🆕 자이로스코프 관련
     private var lastGyroscopeData: FloatArray = FloatArray(3)
     private var gyroscopeTimestamp: Long = 0
     private val gyroscopeBuffer = mutableListOf<GyroscopeReading>()
     
-    // Kalman 필터 상태 변수
+    // Kalman 필터 (위치)
     private var kalmanLat: Double = 0.0
     private var kalmanLng: Double = 0.0
     private var variance: Double = 0.0
     private var isKalmanInitialized = false
+    
+    // 🆕 Kalman 필터 (고도)
+    private var kalmanAltitude: Double = 0.0
+    private var altitudeVariance: Double = 0.0
+    private var isAltitudeKalmanInitialized = false
+    private var altitudeProcessNoise: Double = 0.5
     
     // 운동 타입별 필터 파라미터
     private var processNoise: Double = 0.0
     private var useKalmanFilter: Boolean = false
     private var exerciseType: String = "bicycle"
     private var advancedTracking: Boolean = false
+    
+    // 🆕 통계 데이터
+    private var sessionDistance: Double = 0.0          // 이동 거리 (m)
+    private var sessionElevationGain: Double = 0.0     // 획득 고도 (m)
+    private var sessionElevationLoss: Double = 0.0     // 상실 고도 (m)
+    private var sessionMaxSpeed: Float = 0f            // 최고 속도 (m/s)
+    private var sessionMovingTime: Double = 0.0        // 이동 시간 (초)
+    private var sessionElapsedTime: Double = 0.0       // 총 경과 시간 (초)
+    private var sessionStartTime: Long = 0             // 세션 시작 시간
+    private var previousLocation: Location? = null     // 이전 위치
+    private var previousAltitude: Double = 0.0         // 이전 고도
+    private var lastUpdateTime: Long = 0               // 마지막 업데이트 시간
     
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
@@ -91,7 +111,7 @@ class LocationService : Service(), SensorEventListener {
         private const val GRAVITY = 9.81f
     }
     
-    // 🆕 센서 데이터 클래스들
+    // 센서 데이터 클래스들
     data class AccelerometerReading(
         val x: Float,
         val y: Float,
@@ -112,23 +132,41 @@ class LocationService : Service(), SensorEventListener {
         val enhancedAltitude: Float
     )
     
-    // 🆕 운동 분석 데이터
     data class MotionAnalysis(
-        val roadSurfaceQuality: String,      // "smooth", "rough", "very_rough"
-        val vibrationIntensity: Float,       // 0.0 ~ 1.0
-        val corneringIntensity: Float,       // 0.0 ~ 1.0
-        val inclineAngle: Float,             // -90 ~ 90 (도)
+        val roadSurfaceQuality: String,
+        val vibrationIntensity: Float,
+        val corneringIntensity: Float,
+        val inclineAngle: Float,
         val isClimbing: Boolean,
         val isDescending: Boolean,
         val verticalAcceleration: Float
     )
     
-    // 🆕 통합 센서 데이터
+    // 🆕 Grade 데이터
+    data class GradeData(
+        val grade: Float,              // 경사도 (%)
+        val gradeCategory: String      // flat, gentle, moderate, steep, very_steep
+    )
+    
+    // 🆕 통계 데이터
+    data class SessionStats(
+        val distance: Double,           // 이동 거리 (m)
+        val elevationGain: Double,      // 획득 고도 (m)
+        val elevationLoss: Double,      // 상실 고도 (m)
+        val movingTime: Double,         // 이동 시간 (초)
+        val elapsedTime: Double,        // 총 경과 시간 (초)
+        val maxSpeed: Float,            // 최고 속도 (m/s)
+        val avgSpeed: Double,           // 평균 속도 (m/s) - elapsed 기준
+        val movingAvgSpeed: Double      // 이동 평균 속도 (m/s) - moving 기준
+    )
+    
     data class SensorData(
         val barometer: BarometerData?,
         val accelerometer: AccelerometerData?,
         val gyroscope: GyroscopeData?,
-        val motionAnalysis: MotionAnalysis?
+        val motionAnalysis: MotionAnalysis?,
+        val grade: GradeData?,           // 🆕 Grade 데이터
+        val sessionStats: SessionStats?  // 🆕 세션 통계
     )
     
     data class AccelerometerData(
@@ -181,19 +219,16 @@ class LocationService : Service(), SensorEventListener {
     private fun setupSensors() {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         
-        // 기압계
         pressureSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
         if (pressureSensor != null) {
             Log.d(TAG, "✅ Barometer available: ${pressureSensor!!.name}")
         }
         
-        // 🆕 가속계
         accelerometerSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         if (accelerometerSensor != null) {
             Log.d(TAG, "✅ Accelerometer available: ${accelerometerSensor!!.name}")
         }
         
-        // 🆕 자이로스코프
         gyroscopeSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         if (gyroscopeSensor != null) {
             Log.d(TAG, "✅ Gyroscope available: ${gyroscopeSensor!!.name}")
@@ -201,7 +236,6 @@ class LocationService : Service(), SensorEventListener {
     }
 
     private fun startSensors() {
-        // 기압계 시작
         pressureSensor?.let { sensor ->
             sensorManager?.registerListener(
                 this,
@@ -211,18 +245,16 @@ class LocationService : Service(), SensorEventListener {
             Log.d(TAG, "📊 Barometer started")
         }
         
-        // 🆕 가속계 시작 (advancedTracking일 때만)
         if (advancedTracking) {
             accelerometerSensor?.let { sensor ->
                 sensorManager?.registerListener(
                     this,
                     sensor,
-                    SensorManager.SENSOR_DELAY_GAME // 50Hz 정도
+                    SensorManager.SENSOR_DELAY_GAME
                 )
                 Log.d(TAG, "📊 Accelerometer started (advanced tracking)")
             }
             
-            // 🆕 자이로스코프 시작
             gyroscopeSensor?.let { sensor ->
                 sensorManager?.registerListener(
                     this,
@@ -237,7 +269,6 @@ class LocationService : Service(), SensorEventListener {
     private fun stopSensors() {
         sensorManager?.unregisterListener(this)
         
-        // 상태 초기화
         referencePressure = null
         currentPressure = null
         relativeAltitude = 0f
@@ -262,7 +293,6 @@ class LocationService : Service(), SensorEventListener {
         }
     }
     
-    // 기압계 데이터 처리
     private fun handlePressureData(event: SensorEvent) {
         val pressure = event.values[0]
         currentPressure = pressure
@@ -279,13 +309,20 @@ class LocationService : Service(), SensorEventListener {
                 if (location.hasAltitude() && startGpsAltitude != null) {
                     val gpsAlt = location.altitude.toFloat()
                     val baroAltitude = startGpsAltitude!! + relativeAltitude
-                    enhancedAltitude = (gpsAlt * 0.3f) + (baroAltitude * 0.7f)
+                    
+                    // GPS 30% + 기압계 70%
+                    val rawEnhancedAltitude = (gpsAlt * 0.3f) + (baroAltitude * 0.7f)
+                    
+                    // 🆕 고도 Kalman 필터 적용
+                    enhancedAltitude = applyAltitudeKalmanFilter(
+                        rawEnhancedAltitude.toDouble(),
+                        location.verticalAccuracyMeters.toDouble()
+                    ).toFloat()
                 }
             }
         }
     }
     
-    // 🆕 가속계 데이터 처리
     private fun handleAccelerometerData(event: SensorEvent) {
         if (!advancedTracking) return
         
@@ -299,17 +336,14 @@ class LocationService : Service(), SensorEventListener {
         lastAccelerometerData[2] = z
         accelerometerTimestamp = timestamp
         
-        // 버퍼에 추가
         val reading = AccelerometerReading(x, y, z, timestamp)
         accelerometerBuffer.add(reading)
         
-        // 버퍼 크기 제한
         if (accelerometerBuffer.size > maxBufferSize) {
             accelerometerBuffer.removeAt(0)
         }
     }
     
-    // 🆕 자이로스코프 데이터 처리
     private fun handleGyroscopeData(event: SensorEvent) {
         if (!advancedTracking) return
         
@@ -323,7 +357,6 @@ class LocationService : Service(), SensorEventListener {
         lastGyroscopeData[2] = z
         gyroscopeTimestamp = timestamp
         
-        // 버퍼에 추가
         val reading = GyroscopeReading(x, y, z, timestamp)
         gyroscopeBuffer.add(reading)
         
@@ -334,13 +367,163 @@ class LocationService : Service(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    // 🆕 운동 분석 생성
+    // 🆕 Kalman 필터 (고도)
+    private fun initAltitudeKalmanFilter(altitude: Double) {
+        kalmanAltitude = altitude
+        altitudeVariance = 25.0  // 초기 분산 (5m 정확도 가정)
+        isAltitudeKalmanInitialized = true
+        
+        Log.d(TAG, "[KalmanFilter] Altitude initialized: %.2fm".format(altitude))
+    }
+    
+    private fun applyAltitudeKalmanFilter(measuredAltitude: Double, accuracy: Double): Double {
+        if (!isAltitudeKalmanInitialized) {
+            initAltitudeKalmanFilter(measuredAltitude)
+            return measuredAltitude
+        }
+        
+        // 측정 노이즈
+        var measurementNoise = accuracy * accuracy
+        if (measurementNoise <= 0) {
+            measurementNoise = 25.0  // 기본값
+        }
+        
+        // 예측 단계
+        val predictedVariance = altitudeVariance + altitudeProcessNoise
+        
+        // 칼만 게인
+        val kalmanGain = predictedVariance / (predictedVariance + measurementNoise)
+        
+        // 업데이트 단계
+        kalmanAltitude = kalmanAltitude + kalmanGain * (measuredAltitude - kalmanAltitude)
+        altitudeVariance = (1.0 - kalmanGain) * predictedVariance
+        
+        return kalmanAltitude
+    }
+    
+    private fun resetAltitudeKalmanFilter() {
+        isAltitudeKalmanInitialized = false
+        altitudeVariance = 0.0
+        Log.d(TAG, "[KalmanFilter] Altitude reset")
+    }
+
+    // 🆕 세션 통계 초기화
+    private fun resetSessionStats() {
+        sessionDistance = 0.0
+        sessionElevationGain = 0.0
+        sessionElevationLoss = 0.0
+        sessionMaxSpeed = 0f
+        sessionMovingTime = 0.0
+        sessionElapsedTime = 0.0
+        sessionStartTime = System.currentTimeMillis()
+        previousLocation = null
+        previousAltitude = 0.0
+        lastUpdateTime = 0
+        
+        Log.d(TAG, "[Stats] Session reset")
+    }
+    
+    // 🆕 세션 통계 업데이트
+    private fun updateSessionStats(location: Location, currentAltitude: Double) {
+        val currentTime = location.time
+        
+        if (previousLocation == null) {
+            previousLocation = location
+            previousAltitude = currentAltitude
+            lastUpdateTime = currentTime
+            return
+        }
+        
+        // 1. 거리 계산
+        val distance = previousLocation!!.distanceTo(location).toDouble()
+        
+        // 최소 거리 필터 (노이즈 제거)
+        if (distance in 0.5..100.0) {  // 0.5m ~ 100m 사이만 유효
+            sessionDistance += distance
+        }
+        
+        // 2. 시간 계산
+        val timeDelta = (currentTime - lastUpdateTime) / 1000.0  // 초 단위
+        if (timeDelta in 0.0..10.0) {  // 0초 ~ 10초 사이만 유효 (비정상 값 필터)
+            // 총 경과 시간
+            sessionElapsedTime += timeDelta
+            
+            // 이동 시간 (속도가 0.5 m/s 이상일 때만)
+            if (location.hasSpeed() && location.speed >= 0.5f) {
+                sessionMovingTime += timeDelta
+            }
+        }
+        
+        // 3. 고도 변화 계산
+        val elevationChange = currentAltitude - previousAltitude
+        
+        // 최소 고도 변화 필터 (0.5m 이상만)
+        if (abs(elevationChange) > 0.5) {
+            if (elevationChange > 0) {
+                sessionElevationGain += elevationChange
+            } else {
+                sessionElevationLoss += abs(elevationChange)
+            }
+        }
+        
+        // 4. 최고 속도 업데이트
+        if (location.hasSpeed() && location.speed > sessionMaxSpeed) {
+            sessionMaxSpeed = location.speed
+        }
+        
+        // 이전 위치/고도/시간 업데이트
+        previousLocation = location
+        previousAltitude = currentAltitude
+        lastUpdateTime = currentTime
+    }
+    
+    // 🆕 Grade 계산
+    private fun calculateGrade(location: Location, currentAltitude: Double): GradeData {
+        if (previousLocation == null) {
+            return GradeData(0f, "flat")
+        }
+        
+        // 수평 거리
+        val horizontalDistance = previousLocation!!.distanceTo(location).toDouble()
+        
+        // 최소 거리 필터
+        if (horizontalDistance < 5.0) {
+            return GradeData(0f, "flat")
+        }
+        
+        // 고도 변화
+        val elevationChange = currentAltitude - previousAltitude
+        
+        // Grade 계산 (%)
+        var grade = ((elevationChange / horizontalDistance) * 100.0).toFloat()
+        
+        // 범위 제한 (-30% ~ 30%)
+        grade = max(-30f, min(30f, grade))
+        
+        // 카테고리 결정
+        val category = getGradeCategory(grade)
+        
+        return GradeData(grade, category)
+    }
+    
+    // 🆕 Grade 카테고리
+    private fun getGradeCategory(grade: Float): String {
+        val absGrade = abs(grade)
+        
+        return when {
+            absGrade < 2.0f -> "flat"
+            absGrade < 5.0f -> "gentle"
+            absGrade < 8.0f -> "moderate"
+            absGrade < 12.0f -> "steep"
+            else -> "very_steep"
+        }
+    }
+
     private fun generateMotionAnalysis(): MotionAnalysis? {
         if (!advancedTracking || accelerometerBuffer.isEmpty()) {
             return null
         }
         
-        // 1. 노면 상태 분석 (가속도 변화율)
         val vibrationIntensity = calculateVibrationIntensity()
         val roadSurfaceQuality = when {
             vibrationIntensity < 0.2f -> "smooth"
@@ -348,18 +531,14 @@ class LocationService : Service(), SensorEventListener {
             else -> "very_rough"
         }
         
-        // 2. 코너링 강도 (자이로스코프 Z축)
         val corneringIntensity = if (gyroscopeBuffer.isNotEmpty()) {
             val avgRotationZ = gyroscopeBuffer.map { abs(it.z) }.average().toFloat()
-            (avgRotationZ / 3.0f).coerceIn(0f, 1f) // 정규화
+            (avgRotationZ / 3.0f).coerceIn(0f, 1f)
         } else {
             0f
         }
         
-        // 3. 경사도 분석 (가속도계 기반)
         val (inclineAngle, isClimbing, isDescending) = calculateIncline()
-        
-        // 4. 수직 가속도 (오르막/내리막 강도)
         val verticalAcceleration = lastAccelerometerData[2] - GRAVITY
         
         return MotionAnalysis(
@@ -373,7 +552,6 @@ class LocationService : Service(), SensorEventListener {
         )
     }
     
-    // 🆕 진동 강도 계산 (노면 품질)
     private fun calculateVibrationIntensity(): Float {
         if (accelerometerBuffer.size < 2) return 0f
         
@@ -390,33 +568,24 @@ class LocationService : Service(), SensorEventListener {
         }
         
         val avgVariation = totalVariation / (accelerometerBuffer.size - 1)
-        
-        // 정규화 (경험적 값: 0.5 ~ 3.0 범위를 0 ~ 1로)
         return ((avgVariation - 0.5f) / 2.5f).coerceIn(0f, 1f)
     }
     
-    // 🆕 경사도 계산
     private fun calculateIncline(): Triple<Float, Boolean, Boolean> {
         if (accelerometerBuffer.isEmpty()) {
             return Triple(0f, false, false)
         }
         
-        // 최근 데이터의 평균
         val avgX = accelerometerBuffer.map { it.x }.average().toFloat()
         val avgY = accelerometerBuffer.map { it.y }.average().toFloat()
         val avgZ = accelerometerBuffer.map { it.z }.average().toFloat()
         
-        // 중력 방향을 기준으로 경사도 계산
-        // 기기가 수평일 때 Z ≈ 9.81, X ≈ 0, Y ≈ 0
-        // 앞으로 기울면 Y가 증가, 뒤로 기울면 Y가 감소
-        
-        val totalAccel = sqrt(avgX * avgX + avgY * avgY + avgZ * avgZ)
         val pitchAngle = Math.toDegrees(
             kotlin.math.atan2(avgY.toDouble(), avgZ.toDouble())
         ).toFloat()
         
-        val isClimbing = pitchAngle > 5f  // 5도 이상 오르막
-        val isDescending = pitchAngle < -5f  // 5도 이상 내리막
+        val isClimbing = pitchAngle > 5f
+        val isDescending = pitchAngle < -5f
         
         return Triple(pitchAngle, isClimbing, isDescending)
     }
@@ -427,13 +596,13 @@ class LocationService : Service(), SensorEventListener {
         variance = (location.accuracy * location.accuracy).toDouble()
         isKalmanInitialized = true
         
-        Log.d(TAG, "[KalmanFilter] Initialized: lat=$kalmanLat, lng=$kalmanLng, variance=$variance")
+        Log.d(TAG, "[KalmanFilter] Position initialized")
     }
 
     private fun resetKalmanFilter() {
         isKalmanInitialized = false
         variance = 0.0
-        Log.d(TAG, "[KalmanFilter] Reset")
+        Log.d(TAG, "[KalmanFilter] Position reset")
     }
 
     private fun applyKalmanFilter(newLocation: Location): Location {
@@ -479,15 +648,14 @@ class LocationService : Service(), SensorEventListener {
         
         val locationText = if (lastLocation != null) {
             val baseInfo = "Exercise: $exerciseType (K:$kalmanStatus, ADV:$advancedStatus)\n" +
-                    "Lat: ${String.format("%.6f", lastLocation!!.latitude)}\n" +
-                    "Lng: ${String.format("%.6f", lastLocation!!.longitude)}\n" +
+                    "Distance: ${String.format("%.2f", sessionDistance)}m\n" +
+                    "Elevation +: ${String.format("%.1f", sessionElevationGain)}m\n" +
                     "Speed: ${String.format("%.1f", if (lastLocation!!.hasSpeed()) lastLocation!!.speed * 3.6 else 0f)} km/h"
             
             val motionInfo = if (advancedTracking && accelerometerBuffer.isNotEmpty()) {
                 val analysis = generateMotionAnalysis()
                 analysis?.let {
                     "\nSurface: ${it.roadSurfaceQuality}\n" +
-                    "Vibration: ${String.format("%.2f", it.vibrationIntensity)}\n" +
                     "Incline: ${String.format("%.1f", it.inclineAngle)}°"
                 } ?: ""
             } else ""
@@ -571,6 +739,9 @@ class LocationService : Service(), SensorEventListener {
             }
             
             resetKalmanFilter()
+            resetAltitudeKalmanFilter()
+            resetSessionStats()  // 🆕 통계 리셋
+            
             lastLocation = null
             isNewLocationAvailable = false
             lastSendTime = 0
@@ -590,16 +761,36 @@ class LocationService : Service(), SensorEventListener {
                 override fun onLocationResult(locationResult: LocationResult) {
                     locationResult.lastLocation?.let { location ->
                         if (location.provider == "gps" || location.provider == "fused") {
+                            // 위치 Kalman 필터 적용
                             val processedLocation = if (useKalmanFilter) {
                                 applyKalmanFilter(location)
                             } else {
                                 location
                             }
                             
+                            // 첫 GPS 고도 설정
                             if (startGpsAltitude == null && processedLocation.hasAltitude()) {
                                 startGpsAltitude = processedLocation.altitude.toFloat()
                                 enhancedAltitude = startGpsAltitude!!
+                                
+                                // 🆕 고도 Kalman 필터 초기화
+                                initAltitudeKalmanFilter(startGpsAltitude!!.toDouble())
                             }
+                            
+                            // 🆕 사용할 고도 결정
+                            val currentAltitude = if (pressureSensor != null && startGpsAltitude != null) {
+                                // 기압계 있음 → enhancedAltitude 사용 (이미 Kalman 적용됨)
+                                enhancedAltitude.toDouble()
+                            } else {
+                                // 기압계 없음 → GPS altitude에 Kalman 적용
+                                applyAltitudeKalmanFilter(
+                                    processedLocation.altitude,
+                                    processedLocation.verticalAccuracyMeters.toDouble()
+                                )
+                            }
+                            
+                            // 🆕 통계 업데이트
+                            updateSessionStats(processedLocation, currentAltitude)
                             
                             lastLocation = processedLocation
                             isNewLocationAvailable = true
@@ -667,6 +858,13 @@ class LocationService : Service(), SensorEventListener {
     private fun sendLocationUpdate(location: Location, isNew: Boolean) {
         if (!isForegroundStarted) return
         
+        // 현재 고도 결정
+        val currentAltitude = if (pressureSensor != null && startGpsAltitude != null) {
+            enhancedAltitude.toDouble()
+        } else {
+            kalmanAltitude
+        }
+        
         // 기압계 데이터
         val barometerData = currentPressure?.let { pressure ->
             BarometerData(
@@ -676,7 +874,7 @@ class LocationService : Service(), SensorEventListener {
             )
         }
         
-        // 🆕 가속계 데이터
+        // 가속계 데이터
         val accelerometerData = if (advancedTracking && accelerometerTimestamp > 0) {
             val magnitude = sqrt(
                 lastAccelerometerData[0] * lastAccelerometerData[0] +
@@ -691,7 +889,7 @@ class LocationService : Service(), SensorEventListener {
             )
         } else null
         
-        // 🆕 자이로스코프 데이터
+        // 자이로스코프 데이터
         val gyroscopeData = if (advancedTracking && gyroscopeTimestamp > 0) {
             val rotationRate = sqrt(
                 lastGyroscopeData[0] * lastGyroscopeData[0] +
@@ -706,16 +904,33 @@ class LocationService : Service(), SensorEventListener {
             )
         } else null
         
-        // 🆕 운동 분석 데이터
+        // 운동 분석 데이터
         val motionAnalysis = if (advancedTracking) {
             generateMotionAnalysis()
         } else null
+        
+        // 🆕 Grade 계산
+        val gradeData = calculateGrade(location, currentAltitude)
+        
+        // 🆕 세션 통계
+        val sessionStats = SessionStats(
+            distance = sessionDistance,
+            elevationGain = sessionElevationGain,
+            elevationLoss = sessionElevationLoss,
+            movingTime = sessionMovingTime,
+            elapsedTime = sessionElapsedTime,
+            maxSpeed = sessionMaxSpeed,
+            avgSpeed = if (sessionElapsedTime > 0) sessionDistance / sessionElapsedTime else 0.0,
+            movingAvgSpeed = if (sessionMovingTime > 0) sessionDistance / sessionMovingTime else 0.0
+        )
         
         val sensorData = SensorData(
             barometer = barometerData,
             accelerometer = accelerometerData,
             gyroscope = gyroscopeData,
-            motionAnalysis = motionAnalysis
+            motionAnalysis = motionAnalysis,
+            grade = gradeData,              // 🆕 Grade
+            sessionStats = sessionStats     // 🆕 통계
         )
         
         locationListener?.invoke(location, sensorData)
@@ -724,6 +939,10 @@ class LocationService : Service(), SensorEventListener {
 
     fun stopForegroundTracking() {
         Log.d(TAG, "🛑 Stopping GPS tracking")
+        
+        // 🆕 최종 통계 로그
+        Log.d(TAG, "[Stats] Final - Distance: %.2fm, Elevation Gain: %.2fm, Loss: %.2fm, Max Speed: %.2fm/s, Moving Time: %.0fs, Elapsed Time: %.0fs"
+            .format(sessionDistance, sessionElevationGain, sessionElevationLoss, sessionMaxSpeed, sessionMovingTime, sessionElapsedTime))
         
         stopRepeatLocationUpdates()
         
@@ -734,6 +953,7 @@ class LocationService : Service(), SensorEventListener {
         
         stopSensors()
         resetKalmanFilter()
+        resetAltitudeKalmanFilter()
         
         lastLocation = null
         isNewLocationAvailable = false
@@ -762,6 +982,13 @@ class LocationService : Service(), SensorEventListener {
     fun getLastLocation(): Location? = lastLocation
     
     fun getLastSensorData(): SensorData? {
+        // 현재 고도 결정
+        val currentAltitude = if (pressureSensor != null && startGpsAltitude != null) {
+            enhancedAltitude.toDouble()
+        } else {
+            kalmanAltitude
+        }
+        
         val barometerData = currentPressure?.let {
             BarometerData(currentPressure!!, relativeAltitude, enhancedAltitude)
         }
@@ -796,7 +1023,31 @@ class LocationService : Service(), SensorEventListener {
         
         val motionAnalysis = if (advancedTracking) generateMotionAnalysis() else null
         
-        return SensorData(barometerData, accelerometerData, gyroscopeData, motionAnalysis)
+        // 🆕 Grade 계산
+        val gradeData = lastLocation?.let { location ->
+            calculateGrade(location, currentAltitude)
+        }
+        
+        // 🆕 세션 통계
+        val sessionStats = SessionStats(
+            distance = sessionDistance,
+            elevationGain = sessionElevationGain,
+            elevationLoss = sessionElevationLoss,
+            movingTime = sessionMovingTime,
+            elapsedTime = sessionElapsedTime,
+            maxSpeed = sessionMaxSpeed,
+            avgSpeed = if (sessionElapsedTime > 0) sessionDistance / sessionElapsedTime else 0.0,
+            movingAvgSpeed = if (sessionMovingTime > 0) sessionDistance / sessionMovingTime else 0.0
+        )
+        
+        return SensorData(
+            barometerData, 
+            accelerometerData, 
+            gyroscopeData, 
+            motionAnalysis,
+            gradeData,
+            sessionStats
+        )
     }
     
     fun isBarometerAvailable(): Boolean = pressureSensor != null

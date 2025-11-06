@@ -9,6 +9,7 @@ export enum ExerciseType {
 }
 
 export type RoadSurfaceQuality = "smooth" | "rough" | "very_rough"
+export type GradeCategory = "flat" | "gentle" | "moderate" | "steep" | "very_steep"
 
 export interface GpsTrackerConfig {
   distanceFilter?: number
@@ -49,6 +50,18 @@ export interface MotionAnalysis {
   verticalAcceleration: number // 수직 가속도 (m/s²)
 }
 
+// 🆕 세션 통계 데이터
+export interface SessionStats {
+  sessionDistance: number // 이동 거리 (m)
+  sessionElevationGain: number // 획득 고도 (m)
+  sessionElevationLoss: number // 상실 고도 (m)
+  sessionMovingTime: number // 이동 시간 (초) - 속도 ≥ 0.5 m/s
+  sessionElapsedTime: number // 총 경과 시간 (초)
+  sessionMaxSpeed: number // 최고 속도 (m/s)
+  sessionAvgSpeed: number // 평균 속도 (m/s) - elapsed 기준
+  sessionMovingAvgSpeed: number // 이동 평균 속도 (m/s) - moving 기준
+}
+
 export interface LocationData {
   latitude: number
   longitude: number
@@ -59,11 +72,26 @@ export interface LocationData {
   timestamp: number
   isNewLocation: boolean
   isKalmanFiltered: boolean
+  isMoving: boolean // 🆕 이동 상태 (속도 >= 0.5 m/s)
 
   // 기압계 데이터 (선택적)
   enhancedAltitude?: number // GPS + 기압계 보정 고도
   relativeAltitude?: number // 상대 고도 변화
   pressure?: number // 기압 (hPa)
+
+  // 🆕 Grade 데이터
+  grade?: number // 경사도 (%)
+  gradeCategory?: GradeCategory // 경사도 카테고리
+
+  // 🆕 세션 통계
+  sessionDistance?: number
+  sessionElevationGain?: number
+  sessionElevationLoss?: number
+  sessionMovingTime?: number
+  sessionElapsedTime?: number
+  sessionMaxSpeed?: number
+  sessionAvgSpeed?: number
+  sessionMovingAvgSpeed?: number
 
   // 🆕 가속계 데이터 (advancedTracking=true일 때만)
   accelerometer?: AccelerometerData
@@ -160,6 +188,97 @@ export class MotionAnalyzer {
   }
 }
 
+// 🆕 세션 통계 분석 도우미
+export class SessionAnalyzer {
+  /**
+   * 이동 효율성 계산 (%)
+   * movingTime / elapsedTime * 100
+   */
+  static calculateMovingEfficiency(location: LocationData): number | null {
+    if (!location.sessionMovingTime || !location.sessionElapsedTime) return null
+
+    if (location.sessionElapsedTime === 0) return 0
+
+    return (location.sessionMovingTime / location.sessionElapsedTime) * 100
+  }
+
+  /**
+   * 정지 시간 계산 (초)
+   */
+  static calculateStoppedTime(location: LocationData): number | null {
+    if (!location.sessionMovingTime || !location.sessionElapsedTime) return null
+
+    return location.sessionElapsedTime - location.sessionMovingTime
+  }
+
+  /**
+   * 평균 속도 비교
+   */
+  static compareAverageSpeeds(location: LocationData): {
+    avgSpeed: number
+    movingAvgSpeed: number
+    difference: number
+    efficiencyLoss: number
+  } | null {
+    if (!location.sessionAvgSpeed || !location.sessionMovingAvgSpeed) return null
+
+    return {
+      avgSpeed: location.sessionAvgSpeed,
+      movingAvgSpeed: location.sessionMovingAvgSpeed,
+      difference: location.sessionMovingAvgSpeed - location.sessionAvgSpeed,
+      efficiencyLoss: ((location.sessionMovingAvgSpeed - location.sessionAvgSpeed) / location.sessionMovingAvgSpeed) * 100,
+    }
+  }
+
+  /**
+   * Grade 기반 난이도 점수 (0-100)
+   */
+  static calculateDifficultyScore(location: LocationData): number | null {
+    if (!location.sessionElevationGain || !location.sessionDistance) return null
+
+    const elevationRatio = (location.sessionElevationGain / location.sessionDistance) * 100
+    const score = Math.min(100, elevationRatio * 10)
+
+    return score
+  }
+
+  /**
+   * 운동 요약 생성
+   */
+  static generateSummary(location: LocationData): {
+    distance: string
+    duration: string
+    movingTime: string
+    avgSpeed: string
+    movingAvgSpeed: string
+    elevationGain: string
+    maxSpeed: string
+    efficiency: string
+  } | null {
+    if (!location.sessionDistance || !location.sessionElapsedTime) return null
+
+    const distanceKm = (location.sessionDistance / 1000).toFixed(2)
+    const durationMin = Math.floor(location.sessionElapsedTime / 60)
+    const movingMin = Math.floor((location.sessionMovingTime || 0) / 60)
+    const avgSpeedKmh = ((location.sessionAvgSpeed || 0) * 3.6).toFixed(1)
+    const movingAvgSpeedKmh = ((location.sessionMovingAvgSpeed || 0) * 3.6).toFixed(1)
+    const elevationM = (location.sessionElevationGain || 0).toFixed(0)
+    const maxSpeedKmh = ((location.sessionMaxSpeed || 0) * 3.6).toFixed(1)
+    const efficiency = this.calculateMovingEfficiency(location)?.toFixed(0) || "0"
+
+    return {
+      distance: `${distanceKm} km`,
+      duration: `${durationMin} 분`,
+      movingTime: `${movingMin} 분`,
+      avgSpeed: `${avgSpeedKmh} km/h`,
+      movingAvgSpeed: `${movingAvgSpeedKmh} km/h`,
+      elevationGain: `+${elevationM} m`,
+      maxSpeed: `${maxSpeedKmh} km/h`,
+      efficiency: `${efficiency}%`,
+    }
+  }
+}
+
 // 🆕 센서 데이터 활용 예시 클래스
 export class SensorDataProcessor {
   /**
@@ -196,23 +315,65 @@ export class SensorDataProcessor {
   /**
    * 칼로리 소모량 추정 (운동 분석 데이터 기반)
    */
-  static estimateCaloriesBurn(data: LocationData, durationSeconds: number, userWeightKg: number): number | null {
-    if (!data.motionAnalysis) return null
+  static estimateCaloriesBurn(data: LocationData, userWeightKg: number): number | null {
+    if (!data.sessionElapsedTime) return null
 
-    const { inclineAngle, vibrationIntensity } = data.motionAnalysis
     const speedKmh = data.speed * 3.6
+    const gradePercent = data.grade || 0
 
     // MET (Metabolic Equivalent) 계산
     let met = 0
 
     if (speedKmh > 0) {
-      // 기본 MET + 경사도 보정 + 노면 보정
-      met = 3.5 + speedKmh / 10 + Math.abs(inclineAngle) / 10 + vibrationIntensity
+      // 기본 MET + 경사도 보정
+      met = 3.5 + speedKmh / 10 + Math.abs(gradePercent) / 10
+
+      // 운동 분석 데이터로 추가 보정
+      if (data.motionAnalysis) {
+        met += data.motionAnalysis.vibrationIntensity * 0.5
+      }
     }
 
     // 칼로리 = MET × 체중(kg) × 시간(시간)
-    const hours = durationSeconds / 3600
+    const hours = data.sessionElapsedTime / 3600
     return met * userWeightKg * hours
+  }
+}
+
+// 🆕 Grade 분석 도우미
+export class GradeAnalyzer {
+  /**
+   * Grade 설명 가져오기
+   */
+  static getGradeDescription(grade: number): string {
+    const absGrade = Math.abs(grade)
+
+    if (absGrade < 2) return "평지"
+    if (absGrade < 5) return grade > 0 ? "완만한 오르막" : "완만한 내리막"
+    if (absGrade < 8) return grade > 0 ? "중간 오르막" : "중간 내리막"
+    if (absGrade < 12) return grade > 0 ? "가파른 오르막" : "가파른 내리막"
+    return grade > 0 ? "매우 가파른 오르막" : "매우 가파른 내리막"
+  }
+
+  /**
+   * Grade 색상 가져오기 (UI용)
+   */
+  static getGradeColor(grade: number): string {
+    const absGrade = Math.abs(grade)
+
+    if (absGrade < 2) return "#4CAF50" // 녹색
+    if (absGrade < 5) return "#8BC34A" // 연녹색
+    if (absGrade < 8) return "#FFC107" // 노란색
+    if (absGrade < 12) return "#FF9800" // 주황색
+    return "#F44336" // 빨간색
+  }
+
+  /**
+   * Grade 난이도 (0-10)
+   */
+  static getGradeDifficulty(grade: number): number {
+    const absGrade = Math.abs(grade)
+    return Math.min(10, Math.floor(absGrade / 3))
   }
 }
 
@@ -243,7 +404,7 @@ export const UsageExample = {
 
     // 자전거 모드 + 고급 센서 추적
     await RNRidableGpsTracker.configure({
-      exerciseType: "bicycle",
+      exerciseType: ExerciseType.BICYCLE,
       advancedTracking: true, // 🆕 가속계, 자이로스코프 활성화
       interval: 1000,
       fastestInterval: 1000,
@@ -253,6 +414,32 @@ export const UsageExample = {
     // 위치 이벤트 리스너
     RNRidableGpsTracker.addListener("location", (data: LocationData) => {
       console.log("GPS:", data.latitude, data.longitude)
+
+      // 🆕 이동 상태
+      if (data.isMoving) {
+        console.log("🟢 이동 중:", data.speed * 3.6, "km/h")
+      } else {
+        console.log("🟠 자동 멈춤 (속도 < 0.5 m/s)")
+      }
+
+      // 🆕 Grade 정보
+      if (data.grade !== undefined) {
+        console.log("경사도:", data.grade.toFixed(1), "%")
+        console.log("카테고리:", data.gradeCategory)
+        console.log("설명:", GradeAnalyzer.getGradeDescription(data.grade))
+      }
+
+      // 🆕 세션 통계
+      const summary = SessionAnalyzer.generateSummary(data)
+      if (summary) {
+        console.log("거리:", summary.distance)
+        console.log("경과 시간:", summary.duration)
+        console.log("이동 시간:", summary.movingTime)
+        console.log("평균 속도:", summary.avgSpeed)
+        console.log("이동 평균:", summary.movingAvgSpeed)
+        console.log("획득 고도:", summary.elevationGain)
+        console.log("효율성:", summary.efficiency)
+      }
 
       // 🆕 운동 분석 데이터 활용
       if (data.motionAnalysis) {
@@ -270,14 +457,10 @@ export const UsageExample = {
         console.log("코너 위험도:", cornerRisk)
       }
 
-      // 🆕 가속계 데이터
-      if (data.accelerometer) {
-        console.log("가속도:", data.accelerometer.magnitude.toFixed(2), "m/s²")
-      }
-
-      // 🆕 자이로스코프 데이터
-      if (data.gyroscope) {
-        console.log("회전율:", data.gyroscope.rotationRate.toFixed(2), "rad/s")
+      // 🆕 칼로리 계산
+      const calories = SensorDataProcessor.estimateCaloriesBurn(data, 70) // 70kg 기준
+      if (calories) {
+        console.log("소모 칼로리:", calories.toFixed(0), "kcal")
       }
     })
 

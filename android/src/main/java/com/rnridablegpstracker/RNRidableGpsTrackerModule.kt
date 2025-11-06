@@ -94,7 +94,6 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 config.getString("exerciseType") ?: "bicycle"
             } else "bicycle"
             
-            // 🆕 advancedTracking 처리
             val advancedTracking = if (config.hasKey("advancedTracking")) {
                 config.getBoolean("advancedTracking")
             } else false
@@ -315,7 +314,6 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             putBoolean("isNewLocation", isNew)
             putBoolean("isKalmanFiltered", locationService?.isKalmanFiltered() ?: false)
             
-            // 🆕 센서 데이터
             sensorData?.let { data ->
                 // 기압계 데이터
                 data.barometer?.let { baro ->
@@ -324,7 +322,7 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                     putDouble("pressure", baro.pressure.toDouble())
                 }
                 
-                // 🆕 가속계 데이터
+                // 가속계 데이터
                 data.accelerometer?.let { accel ->
                     val accelMap = Arguments.createMap().apply {
                         putDouble("x", accel.x.toDouble())
@@ -335,7 +333,7 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                     putMap("accelerometer", accelMap)
                 }
                 
-                // 🆕 자이로스코프 데이터
+                // 자이로스코프 데이터
                 data.gyroscope?.let { gyro ->
                     val gyroMap = Arguments.createMap().apply {
                         putDouble("x", gyro.x.toDouble())
@@ -346,7 +344,7 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                     putMap("gyroscope", gyroMap)
                 }
                 
-                // 🆕 운동 분석 데이터
+                // 운동 분석 데이터
                 data.motionAnalysis?.let { motion ->
                     val motionMap = Arguments.createMap().apply {
                         putString("roadSurfaceQuality", motion.roadSurfaceQuality)
@@ -359,7 +357,28 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                     }
                     putMap("motionAnalysis", motionMap)
                 }
+                
+                // 🆕 Grade 데이터
+                data.grade?.let { grade ->
+                    putDouble("grade", grade.grade.toDouble())
+                    putString("gradeCategory", grade.gradeCategory)
+                }
+                
+                // 🆕 세션 통계
+                data.sessionStats?.let { stats ->
+                    putDouble("sessionDistance", stats.distance)
+                    putDouble("sessionElevationGain", stats.elevationGain)
+                    putDouble("sessionElevationLoss", stats.elevationLoss)
+                    putDouble("sessionMovingTime", stats.movingTime)
+                    putDouble("sessionElapsedTime", stats.elapsedTime)
+                    putDouble("sessionMaxSpeed", stats.maxSpeed.toDouble())
+                    putDouble("sessionAvgSpeed", stats.avgSpeed)
+                    putDouble("sessionMovingAvgSpeed", stats.movingAvgSpeed)
+                }
             }
+            
+            // 🆕 이동 상태
+            putBoolean("isMoving", if (location.hasSpeed()) location.speed >= 0.5f else false)
         }
     }
 

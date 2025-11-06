@@ -31,12 +31,62 @@ export interface Spec extends TurboModule {
     timestamp: number
     isNewLocation: boolean
     isKalmanFiltered?: boolean
+    isMoving: boolean // 🆕 이동 상태
+
+    // 🆕 Grade 데이터
+    grade?: number
+    gradeCategory?: string
+
+    // 🆕 세션 통계
+    sessionDistance?: number
+    sessionElevationGain?: number
+    sessionElevationLoss?: number
+    sessionMovingTime?: number
+    sessionElapsedTime?: number
+    sessionMaxSpeed?: number
+    sessionAvgSpeed?: number
+    sessionMovingAvgSpeed?: number
+
+    // 🆕 가속계 데이터 (advancedTracking=true일 때만)
+    accelerometer?: {
+      x: number
+      y: number
+      z: number
+      magnitude: number
+    }
+
+    // 🆕 자이로스코프 데이터 (advancedTracking=true일 때만)
+    gyroscope?: {
+      x: number
+      y: number
+      z: number
+      rotationRate: number
+    }
+
+    // 🆕 운동 분석 데이터 (advancedTracking=true일 때만)
+    motionAnalysis?: {
+      roadSurfaceQuality: string
+      vibrationIntensity: number
+      corneringIntensity: number
+      inclineAngle: number
+      isClimbing: boolean
+      isDescending: boolean
+      verticalAcceleration: number
+    }
   }>
 
   checkStatus(): Promise<{
     isRunning: boolean
     isAuthorized: boolean
     authorizationStatus: string
+    isBarometerAvailable: boolean
+    isAccelerometerAvailable?: boolean // 🆕
+    isGyroscopeAvailable?: boolean // 🆕
+    isServiceBound?: boolean
+    exerciseType: string
+    advancedTracking?: boolean // 🆕
+    isKalmanEnabled?: boolean
+    useKalmanFilter?: boolean
   }>
 
   requestPermissions(): Promise<boolean>

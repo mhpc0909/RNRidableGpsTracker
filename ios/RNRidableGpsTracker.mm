@@ -22,13 +22,19 @@
 @property (nonatomic, assign) BOOL hasStartGpsAltitude;
 @property (nonatomic, assign) double enhancedAltitude;
 
-// Kalman 필터
+// Kalman 필터 (위치)
 @property (nonatomic, assign) double kalmanLat;
 @property (nonatomic, assign) double kalmanLng;
 @property (nonatomic, assign) double variance;
 @property (nonatomic, assign) BOOL isKalmanInitialized;
 @property (nonatomic, assign) double processNoise;
 @property (nonatomic, assign) BOOL useKalmanFilter;
+
+// 🆕 Kalman 필터 (고도)
+@property (nonatomic, assign) double kalmanAltitude;
+@property (nonatomic, assign) double altitudeVariance;
+@property (nonatomic, assign) BOOL isAltitudeKalmanInitialized;
+@property (nonatomic, assign) double altitudeProcessNoise;
 
 // 설정
 @property (nonatomic, strong) NSString *exerciseType;
@@ -49,6 +55,18 @@
 @property (nonatomic, assign) NSTimeInterval lastGyroTimestamp;
 
 @property (nonatomic, assign) NSInteger maxBufferSize;
+
+// 🆕 통계 데이터
+@property (nonatomic, assign) double sessionDistance;          // 이동 거리 (m)
+@property (nonatomic, assign) double sessionElevationGain;     // 획득 고도 (m)
+@property (nonatomic, assign) double sessionElevationLoss;     // 상실 고도 (m)
+@property (nonatomic, assign) double sessionMaxSpeed;          // 최고 속도 (m/s)
+@property (nonatomic, assign) double sessionMovingTime;        // 이동 시간 (초)
+@property (nonatomic, assign) double sessionElapsedTime;       // 총 경과 시간 (초)
+@property (nonatomic, assign) NSTimeInterval sessionStartTime; // 세션 시작 시간
+@property (nonatomic, strong) CLLocation *previousLocation;    // 이전 위치
+@property (nonatomic, assign) double previousAltitude;         // 이전 고도
+@property (nonatomic, assign) NSTimeInterval lastUpdateTime;   // 마지막 업데이트 시간
 
 @end
 
@@ -71,14 +89,29 @@ RCT_EXPORT_MODULE()
         _isNewLocationAvailable = NO;
         _hasStartGpsAltitude = NO;
         _isKalmanInitialized = NO;
+        _isAltitudeKalmanInitialized = NO;
         _useKalmanFilter = NO;
         _exerciseType = @"bicycle";
         _advancedTracking = NO;
         _variance = 0.0;
         _processNoise = 0.0;
+        _altitudeVariance = 0.0;
+        _altitudeProcessNoise = 0.5;  // 고도 Kalman 프로세스 노이즈
         _maxBufferSize = 10;
         _accelerometerBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
         _gyroscopeBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
+        
+        // 🆕 통계 초기화
+        _sessionDistance = 0.0;
+        _sessionElevationGain = 0.0;
+        _sessionElevationLoss = 0.0;
+        _sessionMaxSpeed = 0.0;
+        _sessionMovingTime = 0.0;
+        _sessionElapsedTime = 0.0;
+        _sessionStartTime = 0;
+        _previousLocation = nil;
+        _previousAltitude = 0.0;
+        _lastUpdateTime = 0;
     }
     return self;
 }
@@ -107,7 +140,7 @@ RCT_EXPORT_MODULE()
 - (void)setupMotionManager
 {
     self.motionManager = [[CMMotionManager alloc] init];
-    self.motionManager.accelerometerUpdateInterval = 0.02; // 50Hz
+    self.motionManager.accelerometerUpdateInterval = 0.02;
     self.motionManager.gyroUpdateInterval = 0.02;
     
     if (self.motionManager.isAccelerometerAvailable) {
@@ -136,7 +169,7 @@ RCT_EXPORT_MODULE()
     RCTLogInfo(@"[RNRidableGpsTracker] stopObserving");
 }
 
-#pragma mark - Kalman Filter
+#pragma mark - Kalman Filter (위치)
 
 - (void)initKalmanFilter:(CLLocation *)location
 {
@@ -145,8 +178,7 @@ RCT_EXPORT_MODULE()
     self.variance = location.horizontalAccuracy * location.horizontalAccuracy;
     self.isKalmanInitialized = YES;
     
-    RCTLogInfo(@"[KalmanFilter] Initialized: lat=%.6f, lng=%.6f, variance=%.2f",
-               self.kalmanLat, self.kalmanLng, self.variance);
+    RCTLogInfo(@"[KalmanFilter] Position initialized");
 }
 
 - (CLLocation *)applyKalmanFilter:(CLLocation *)newLocation
@@ -180,7 +212,158 @@ RCT_EXPORT_MODULE()
 {
     self.isKalmanInitialized = NO;
     self.variance = 0.0;
-    RCTLogInfo(@"[KalmanFilter] Reset");
+    RCTLogInfo(@"[KalmanFilter] Position reset");
+}
+
+#pragma mark - 🆕 Kalman Filter (고도)
+
+- (void)initAltitudeKalmanFilter:(double)altitude
+{
+    self.kalmanAltitude = altitude;
+    self.altitudeVariance = 25.0;  // 초기 분산 (5m 정확도 가정)
+    self.isAltitudeKalmanInitialized = YES;
+    
+    RCTLogInfo(@"[KalmanFilter] Altitude initialized: %.2fm", altitude);
+}
+
+- (double)applyAltitudeKalmanFilter:(double)measuredAltitude accuracy:(double)accuracy
+{
+    if (!self.isAltitudeKalmanInitialized) {
+        [self initAltitudeKalmanFilter:measuredAltitude];
+        return measuredAltitude;
+    }
+    
+    // 측정 노이즈
+    double measurementNoise = accuracy * accuracy;
+    if (measurementNoise <= 0) {
+        measurementNoise = 25.0;  // 기본값
+    }
+    
+    // 예측 단계
+    double predictedVariance = self.altitudeVariance + self.altitudeProcessNoise;
+    
+    // 칼만 게인
+    double kalmanGain = predictedVariance / (predictedVariance + measurementNoise);
+    
+    // 업데이트 단계
+    self.kalmanAltitude = self.kalmanAltitude + kalmanGain * (measuredAltitude - self.kalmanAltitude);
+    self.altitudeVariance = (1.0 - kalmanGain) * predictedVariance;
+    
+    return self.kalmanAltitude;
+}
+
+- (void)resetAltitudeKalmanFilter
+{
+    self.isAltitudeKalmanInitialized = NO;
+    self.altitudeVariance = 0.0;
+    RCTLogInfo(@"[KalmanFilter] Altitude reset");
+}
+
+#pragma mark - 🆕 통계 계산
+
+- (void)resetSessionStats
+{
+    self.sessionDistance = 0.0;
+    self.sessionElevationGain = 0.0;
+    self.sessionElevationLoss = 0.0;
+    self.sessionMaxSpeed = 0.0;
+    self.sessionMovingTime = 0.0;
+    self.sessionElapsedTime = 0.0;
+    self.sessionStartTime = [[NSDate date] timeIntervalSince1970];
+    self.previousLocation = nil;
+    self.previousAltitude = 0.0;
+    self.lastUpdateTime = 0;
+    
+    RCTLogInfo(@"[Stats] Session reset");
+}
+
+- (void)updateSessionStats:(CLLocation *)location currentAltitude:(double)currentAltitude
+{
+    NSTimeInterval currentTime = [location.timestamp timeIntervalSince1970];
+    
+    if (!self.previousLocation) {
+        self.previousLocation = location;
+        self.previousAltitude = currentAltitude;
+        self.lastUpdateTime = currentTime;
+        return;
+    }
+    
+    // 1. 거리 계산 (✅ 수정: distanceFromLocation: 사용)
+    CLLocationDistance distance = [self.previousLocation distanceFromLocation:location];
+    
+    // 최소 거리 필터 (노이즈 제거)
+    if (distance > 0.5 && distance < 100) {  // 0.5m ~ 100m 사이만 유효
+        self.sessionDistance += distance;
+    }
+    
+    // 2. 시간 계산
+    NSTimeInterval timeDelta = currentTime - self.lastUpdateTime;
+    if (timeDelta > 0 && timeDelta < 10) {  // 0초 ~ 10초 사이만 유효 (비정상 값 필터)
+        // 총 경과 시간
+        self.sessionElapsedTime += timeDelta;
+        
+        // 이동 시간 (속도가 0.5 m/s 이상일 때만)
+        if (location.speed >= 0.5) {
+            self.sessionMovingTime += timeDelta;
+        }
+    }
+    
+    // 3. 고도 변화 계산
+    double elevationChange = currentAltitude - self.previousAltitude;
+    
+    // 최소 고도 변화 필터 (0.5m 이상만)
+    if (fabs(elevationChange) > 0.5) {
+        if (elevationChange > 0) {
+            self.sessionElevationGain += elevationChange;
+        } else {
+            self.sessionElevationLoss += fabs(elevationChange);
+        }
+    }
+    
+    // 4. 최고 속도 업데이트
+    if (location.speed >= 0 && location.speed > self.sessionMaxSpeed) {
+        self.sessionMaxSpeed = location.speed;
+    }
+    
+    // 이전 위치/고도/시간 업데이트
+    self.previousLocation = location;
+    self.previousAltitude = currentAltitude;
+    self.lastUpdateTime = currentTime;
+}
+
+- (double)calculateGrade:(CLLocation *)location currentAltitude:(double)currentAltitude
+{
+    if (!self.previousLocation) {
+        return 0.0;
+    }
+    
+    // 수평 거리 (✅ 수정: distanceFromLocation: 사용)
+    CLLocationDistance horizontalDistance = [self.previousLocation distanceFromLocation:location];
+    
+    // 최소 거리 필터
+    if (horizontalDistance < 5.0) {
+        return 0.0;
+    }
+    
+    // 고도 변화
+    double elevationChange = currentAltitude - self.previousAltitude;
+    
+    // Grade 계산 (%)
+    double grade = (elevationChange / horizontalDistance) * 100.0;
+    
+    // 범위 제한 (-30% ~ 30%)
+    return fmax(-30.0, fmin(30.0, grade));
+}
+
+- (NSString *)getGradeCategory:(double)grade
+{
+    double absGrade = fabs(grade);
+    
+    if (absGrade < 2.0) return @"flat";
+    if (absGrade < 5.0) return @"gentle";
+    if (absGrade < 8.0) return @"moderate";
+    if (absGrade < 12.0) return @"steep";
+    return @"very_steep";
 }
 
 RCT_EXPORT_METHOD(configure:(NSDictionary *)config
@@ -230,25 +413,21 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
             self.locationManager.activityType = CLActivityTypeFitness;
             self.useKalmanFilter = NO;
             self.processNoise = 0.0;
-            RCTLogInfo(@"[Config] 🚴 Bicycle: Kalman OFF, Advanced=%d", self.advancedTracking);
             
         } else if ([exerciseType isEqualToString:@"running"]) {
             self.locationManager.activityType = CLActivityTypeFitness;
             self.useKalmanFilter = YES;
             self.processNoise = 0.5;
-            RCTLogInfo(@"[Config] 🏃 Running: Kalman ON (light), Advanced=%d", self.advancedTracking);
             
         } else if ([exerciseType isEqualToString:@"hiking"]) {
             self.locationManager.activityType = CLActivityTypeFitness;
             self.useKalmanFilter = YES;
             self.processNoise = 1.0;
-            RCTLogInfo(@"[Config] 🥾 Hiking: Kalman ON (medium), Advanced=%d", self.advancedTracking);
             
         } else if ([exerciseType isEqualToString:@"walking"]) {
             self.locationManager.activityType = CLActivityTypeFitness;
             self.useKalmanFilter = YES;
             self.processNoise = 2.0;
-            RCTLogInfo(@"[Config] 🚶 Walking: Kalman ON (strong), Advanced=%d", self.advancedTracking);
         }
     } else {
         self.exerciseType = @"bicycle";
@@ -277,6 +456,8 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
     RCTLogInfo(@"[RNRidableGpsTracker] 🚀 Starting: %@ (Advanced: %d)", self.exerciseType, self.advancedTracking);
     
     [self resetKalmanFilter];
+    [self resetAltitudeKalmanFilter];
+    [self resetSessionStats];  // 🆕 통계 리셋
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.isTracking = YES;
@@ -302,8 +483,12 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
     [self stopAdvancedSensors];
     [self stopRepeatLocationUpdates];
     [self resetKalmanFilter];
+    [self resetAltitudeKalmanFilter];
     
     RCTLogInfo(@"[RNRidableGpsTracker] 🛑 Tracking stopped");
+    RCTLogInfo(@"[Stats] Final - Distance: %.2fm, Elevation Gain: %.2fm, Loss: %.2fm, Max Speed: %.2fm/s, Moving Time: %.0fs, Elapsed Time: %.0fs",
+               self.sessionDistance, self.sessionElevationGain, self.sessionElevationLoss, self.sessionMaxSpeed, self.sessionMovingTime, self.sessionElapsedTime);
+    
     resolve(nil);
 }
 
@@ -311,7 +496,16 @@ RCT_EXPORT_METHOD(getCurrentLocation:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
     if (self.lastLocation) {
-        resolve([self convertLocationToDict:self.lastLocation withNewFlag:NO]);
+        // ✅ 수정: withNewFlag:currentAltitude: 파라미터 추가
+        double currentAltitude;
+        if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
+            currentAltitude = self.enhancedAltitude;
+        } else {
+            currentAltitude = self.kalmanAltitude;
+        }
+        resolve([self convertLocationToDict:self.lastLocation 
+                                withNewFlag:NO 
+                            currentAltitude:currentAltitude]);
     } else {
         reject(@"NO_LOCATION", @"No location available", nil);
     }
@@ -417,7 +611,13 @@ RCT_EXPORT_METHOD(openLocationSettings)
                 double gpsAltitude = self.lastLocation.altitude;
                 double relativeAltitude = [altitudeData.relativeAltitude doubleValue];
                 double barometerAltitude = self.startGpsAltitude + relativeAltitude;
-                self.enhancedAltitude = (gpsAltitude * 0.3) + (barometerAltitude * 0.7);
+                
+                // enhancedAltitude = GPS 30% + 기압계 70%
+                double rawEnhancedAltitude = (gpsAltitude * 0.3) + (barometerAltitude * 0.7);
+                
+                // 🆕 Kalman 필터 적용
+                self.enhancedAltitude = [self applyAltitudeKalmanFilter:rawEnhancedAltitude 
+                                                               accuracy:self.lastLocation.verticalAccuracy];
             }
         }
     }];
@@ -532,7 +732,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
         return nil;
     }
     
-    // 1. 진동 강도 계산
     double vibrationIntensity = [self calculateVibrationIntensity];
     NSString *roadSurfaceQuality;
     
@@ -544,7 +743,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
         roadSurfaceQuality = @"very_rough";
     }
     
-    // 2. 코너링 강도
     double corneringIntensity = 0.0;
     if (self.gyroscopeBuffer.count > 0) {
         double totalRotZ = 0.0;
@@ -555,10 +753,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
         corneringIntensity = MIN(avgRotationZ / 3.0, 1.0);
     }
     
-    // 3. 경사도 분석
     NSDictionary *inclineData = [self calculateIncline];
-    
-    // 4. 수직 가속도 (iOS 좌표계 고려)
     double verticalAcceleration = fabs(self.lastAccelZ) - 9.81;
     
     return @{
@@ -590,7 +785,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
     }
     
     double avgVariation = totalVariation / (self.accelerometerBuffer.count - 1);
-    
     return MAX(0.0, MIN(1.0, (avgVariation - 0.5) / 2.5));
 }
 
@@ -604,7 +798,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
         };
     }
     
-    // 평균 계산
     double sumX = 0, sumY = 0, sumZ = 0;
     for (NSDictionary *reading in self.accelerometerBuffer) {
         sumX += [reading[@"x"] doubleValue];
@@ -616,12 +809,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
     double avgY = sumY / self.accelerometerBuffer.count;
     double avgZ = sumZ / self.accelerometerBuffer.count;
     
-    // 🔧 경사각 계산 수정
-    // iOS 좌표계: 기기를 수평으로 놓았을 때 Z ≈ -9.81 (아래 방향)
-    // pitch angle (앞뒤 기울기) 계산
     double pitchAngle = atan2(avgY, sqrt(avgX * avgX + avgZ * avgZ)) * 180.0 / M_PI;
-    
-    // 각도 범위 제한 (-90 ~ 90)
     pitchAngle = fmax(-90.0, fmin(90.0, pitchAngle));
     
     BOOL isClimbing = pitchAngle > 5.0;
@@ -641,24 +829,46 @@ RCT_EXPORT_METHOD(openLocationSettings)
     CLLocation *location = locations.lastObject;
     if (!location) return;
     
+    // 위치 Kalman 필터 적용
     CLLocation *processedLocation = location;
     if (self.useKalmanFilter) {
         processedLocation = [self applyKalmanFilter:location];
     }
     
+    // 첫 GPS 고도 설정
     if (!self.hasStartGpsAltitude && processedLocation.verticalAccuracy >= 0) {
         self.startGpsAltitude = processedLocation.altitude;
         self.enhancedAltitude = self.startGpsAltitude;
         self.hasStartGpsAltitude = YES;
+        
+        // 고도 Kalman 필터 초기화
+        [self initAltitudeKalmanFilter:self.startGpsAltitude];
+        
         RCTLogInfo(@"[RNRidableGpsTracker] 🎯 Start altitude: %.1fm", self.startGpsAltitude);
     }
+    
+    // 🆕 사용할 고도 결정
+    double currentAltitude;
+    if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
+        // 기압계 있음 → enhancedAltitude 사용 (이미 Kalman 적용됨)
+        currentAltitude = self.enhancedAltitude;
+    } else {
+        // 기압계 없음 → GPS altitude에 Kalman 적용
+        currentAltitude = [self applyAltitudeKalmanFilter:processedLocation.altitude 
+                                                 accuracy:processedLocation.verticalAccuracy];
+    }
+    
+    // 🆕 통계 업데이트
+    [self updateSessionStats:processedLocation currentAltitude:currentAltitude];
     
     self.lastLocation = processedLocation;
     self.lastLocationTimestamp = processedLocation.timestamp;
     self.isNewLocationAvailable = YES;
     
     if (self.isTracking && self.hasListeners) {
-        [self sendEventWithName:@"location" body:[self convertLocationToDict:processedLocation withNewFlag:YES]];
+        [self sendEventWithName:@"location" body:[self convertLocationToDict:processedLocation 
+                                                                withNewFlag:YES 
+                                                            currentAltitude:currentAltitude]];
         self.isNewLocationAvailable = NO;
     }
 }
@@ -742,7 +952,18 @@ RCT_EXPORT_METHOD(openLocationSettings)
 {
     if (self.lastLocation && self.isTracking && self.hasListeners) {
         BOOL isNew = self.isNewLocationAvailable;
-        [self sendEventWithName:@"location" body:[self convertLocationToDict:self.lastLocation withNewFlag:isNew]];
+        
+        // 현재 고도 결정
+        double currentAltitude;
+        if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
+            currentAltitude = self.enhancedAltitude;
+        } else {
+            currentAltitude = self.kalmanAltitude;
+        }
+        
+        [self sendEventWithName:@"location" body:[self convertLocationToDict:self.lastLocation 
+                                                                withNewFlag:isNew 
+                                                            currentAltitude:currentAltitude]];
         
         if (isNew) {
             self.isNewLocationAvailable = NO;
@@ -752,7 +973,9 @@ RCT_EXPORT_METHOD(openLocationSettings)
 
 #pragma mark - Helper
 
-- (NSDictionary *)convertLocationToDict:(CLLocation *)location withNewFlag:(BOOL)isNew
+- (NSDictionary *)convertLocationToDict:(CLLocation *)location 
+                           withNewFlag:(BOOL)isNew 
+                       currentAltitude:(double)currentAltitude
 {
     NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithDictionary:@{
         @"latitude": @(location.coordinate.latitude),
@@ -763,7 +986,18 @@ RCT_EXPORT_METHOD(openLocationSettings)
         @"bearing": @(location.course >= 0 ? location.course : 0),
         @"timestamp": @([location.timestamp timeIntervalSince1970] * 1000),
         @"isNewLocation": @(isNew),
-        @"isKalmanFiltered": @(self.useKalmanFilter && self.isKalmanInitialized)
+        @"isKalmanFiltered": @(self.useKalmanFilter && self.isKalmanInitialized),
+        
+        // 🆕 통계 데이터
+        @"sessionDistance": @(self.sessionDistance),
+        @"sessionElevationGain": @(self.sessionElevationGain),
+        @"sessionElevationLoss": @(self.sessionElevationLoss),
+        @"sessionMovingTime": @(self.sessionMovingTime),
+        @"sessionElapsedTime": @(self.sessionElapsedTime),
+        @"sessionMaxSpeed": @(self.sessionMaxSpeed),
+        @"sessionAvgSpeed": @(self.sessionElapsedTime > 0 ? self.sessionDistance / self.sessionElapsedTime : 0.0),
+        @"sessionMovingAvgSpeed": @(self.sessionMovingTime > 0 ? self.sessionDistance / self.sessionMovingTime : 0.0),
+        @"isMoving": @(location.speed >= 0.5)
     }];
     
     // 기압계 데이터
@@ -771,9 +1005,19 @@ RCT_EXPORT_METHOD(openLocationSettings)
         double relativeAltitude = [self.lastAltitudeData.relativeAltitude doubleValue];
         double pressure = [self.lastAltitudeData.pressure doubleValue];
         
-        dict[@"enhancedAltitude"] = @(self.enhancedAltitude);
+        dict[@"enhancedAltitude"] = @(currentAltitude);
         dict[@"relativeAltitude"] = @(relativeAltitude);
         dict[@"pressure"] = @(pressure);
+        
+        // 🆕 Grade 계산 (enhancedAltitude 기반)
+        double grade = [self calculateGrade:location currentAltitude:currentAltitude];
+        dict[@"grade"] = @(grade);
+        dict[@"gradeCategory"] = [self getGradeCategory:grade];
+    } else {
+        // 기압계 없을 때도 altitude로 Grade 계산
+        double grade = [self calculateGrade:location currentAltitude:currentAltitude];
+        dict[@"grade"] = @(grade);
+        dict[@"gradeCategory"] = [self getGradeCategory:grade];
     }
     
     // 가속계 데이터

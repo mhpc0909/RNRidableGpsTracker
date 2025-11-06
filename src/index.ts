@@ -1,176 +1,226 @@
 import { NativeEventEmitter, NativeModules, Platform } from "react-native"
-import type { LocationConfig, LocationData, LocationStatus, LocationEventCallback } from "./types"
+import type { GpsTrackerConfig, LocationData, TrackerStatus, LocationEventCallback, ErrorEventCallback, AuthorizationChangedCallback, ExerciseType, RoadSurfaceQuality, GradeCategory, AccelerometerData, GyroscopeData, MotionAnalysis, SessionStats, RNRidableGpsTrackerModule } from "./types"
 
-const LINKING_ERROR = `The package 'react-native-ridable-gps-tracker' doesn't seem to be linked. Make sure: \n\n` + Platform.select({ ios: "- Run 'pod install'\n", default: "" }) + "- Rebuild the app after installing the package\n"
+// 🆕 헬퍼 클래스 export
+export { MotionAnalyzer, SensorDataProcessor, SessionAnalyzer, GradeAnalyzer } from "./types"
 
-const RidableGpsTrackerModule = NativeModules.RNRidableGpsTracker
+// 타입 export
+export type { GpsTrackerConfig, LocationData, TrackerStatus, LocationEventCallback, ErrorEventCallback, AuthorizationChangedCallback, ExerciseType, RoadSurfaceQuality, GradeCategory, AccelerometerData, GyroscopeData, MotionAnalysis, SessionStats, RNRidableGpsTrackerModule }
 
-if (!RidableGpsTrackerModule) {
-  throw new Error(LINKING_ERROR)
-}
+// enum export
+export { ExerciseType } from "./types"
 
-// Create event emitter
-const eventEmitter = new NativeEventEmitter(RidableGpsTrackerModule)
+// Native Module
+const LINKING_ERROR = `The package 'react-native-ridable-gps-tracker' doesn't seem to be linked. Make sure: \n\n` + Platform.select({ ios: "- Run 'pod install'\n", default: "" }) + "- Rebuild the app after installing the package\n" + "- If you are using Expo, run 'npx expo prebuild'\n"
 
-class RidableGpsTracker {
-  private locationListener: any = null
-  private errorListener: any = null
-  private authListener: any = null
-  private isListenersReady = false
+const RNRidableGpsTracker: RNRidableGpsTrackerModule = NativeModules.RNRidableGpsTracker
+  ? NativeModules.RNRidableGpsTracker
+  : new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(LINKING_ERROR)
+        },
+      }
+    )
+
+const eventEmitter = new NativeEventEmitter(RNRidableGpsTracker as any)
+
+// GPS Tracker Class
+export class GpsTracker {
+  private static locationListener: any = null
+  private static errorListener: any = null
+  private static authorizationListener: any = null
 
   /**
-   * Configure GPS tracking settings
+   * GPS 추적 설정
    */
-  async configure(config: LocationConfig): Promise<void> {
-    return RidableGpsTrackerModule.configure(config)
+  static async configure(config: GpsTrackerConfig): Promise<void> {
+    return RNRidableGpsTracker.configure(config)
   }
 
   /**
-   * Start GPS tracking
+   * GPS 추적 시작
    */
-  async start(): Promise<void> {
-    console.log("[RidableGpsTracker] start() called")
-
-    // 리스너가 준비될 때까지 대기
-    if (!this.isListenersReady) {
-      console.warn("[RidableGpsTracker] ⚠️ Listeners not ready yet, waiting...")
-      await new Promise((resolve) => setTimeout(resolve, 300))
-    }
-
-    console.log("[RidableGpsTracker] Starting GPS tracking...")
-    return RidableGpsTrackerModule.start()
+  static async start(): Promise<void> {
+    return RNRidableGpsTracker.start()
   }
 
   /**
-   * Stop GPS tracking
+   * GPS 추적 중지
    */
-  async stop(): Promise<void> {
-    return RidableGpsTrackerModule.stop()
+  static async stop(): Promise<void> {
+    return RNRidableGpsTracker.stop()
   }
 
   /**
-   * Get current location (last known location)
+   * 현재 위치 가져오기
    */
-  async getCurrentLocation(): Promise<LocationData> {
-    return RidableGpsTrackerModule.getCurrentLocation()
+  static async getCurrentLocation(): Promise<LocationData> {
+    return RNRidableGpsTracker.getCurrentLocation()
   }
 
   /**
-   * Check tracking status and permissions
+   * 상태 확인
    */
-  async checkStatus(): Promise<LocationStatus> {
-    return RidableGpsTrackerModule.checkStatus()
+  static async checkStatus(): Promise<TrackerStatus> {
+    return RNRidableGpsTracker.checkStatus()
   }
 
   /**
-   * Request location permissions
+   * 권한 요청
    */
-  async requestPermissions(): Promise<boolean> {
-    return RidableGpsTrackerModule.requestPermissions()
+  static async requestPermissions(): Promise<boolean> {
+    return RNRidableGpsTracker.requestPermissions()
   }
 
   /**
-   * Open device location settings
+   * 위치 설정 열기
    */
-  openLocationSettings(): void {
-    RidableGpsTrackerModule.openLocationSettings()
+  static openLocationSettings(): void {
+    RNRidableGpsTracker.openLocationSettings()
   }
 
   /**
-   * Add listener for location updates
+   * 위치 이벤트 리스너 등록
    */
-  addLocationListener(callback: LocationEventCallback): () => void {
-    console.log("[RidableGpsTracker] addLocationListener() called")
-
-    // JS 이벤트 리스너 등록 - 이것이 자동으로 startObserving을 트리거함
+  static addLocationListener(callback: LocationEventCallback): void {
+    this.removeLocationListener()
     this.locationListener = eventEmitter.addListener("location", callback)
-    this.isListenersReady = true
-
-    console.log("[RidableGpsTracker] ✅ Location listener registered")
-
-    return () => {
-      this.removeLocationListener()
-    }
   }
 
   /**
-   * Remove location listener
+   * 에러 이벤트 리스너 등록
    */
-  removeLocationListener(): void {
-    if (this.locationListener) {
-      this.locationListener.remove()
-      this.locationListener = null
-
-      // 모든 리스너가 제거되면 준비 플래그 해제
-      if (!this.errorListener && !this.authListener) {
-        this.isListenersReady = false
-      }
-      console.log("[RidableGpsTracker] Location listener removed")
-    }
-  }
-
-  /**
-   * Add listener for errors
-   */
-  addErrorListener(callback: (error: { code: number; message: string }) => void): () => void {
-    console.log("[RidableGpsTracker] addErrorListener() called")
-
+  static addErrorListener(callback: ErrorEventCallback): void {
+    this.removeErrorListener()
     this.errorListener = eventEmitter.addListener("error", callback)
-    this.isListenersReady = true
-
-    console.log("[RidableGpsTracker] ✅ Error listener registered")
-
-    return () => {
-      if (this.errorListener) {
-        this.errorListener.remove()
-        this.errorListener = null
-        if (!this.locationListener && !this.authListener) {
-          this.isListenersReady = false
-        }
-        console.log("[RidableGpsTracker] Error listener removed")
-      }
-    }
   }
 
   /**
-   * Add listener for authorization changes
+   * 권한 변경 이벤트 리스너 등록
    */
-  addAuthorizationListener(callback: (status: { status: string }) => void): () => void {
-    console.log("[RidableGpsTracker] addAuthorizationListener() called")
-
-    this.authListener = eventEmitter.addListener("authorizationChanged", callback)
-    this.isListenersReady = true
-
-    return () => {
-      if (this.authListener) {
-        this.authListener.remove()
-        this.authListener = null
-        if (!this.locationListener && !this.errorListener) {
-          this.isListenersReady = false
-        }
-      }
-    }
+  static addAuthorizationListener(callback: AuthorizationChangedCallback): void {
+    this.removeAuthorizationListener()
+    this.authorizationListener = eventEmitter.addListener("authorizationChanged", callback)
   }
 
   /**
-   * Remove all listeners
+   * 위치 리스너 제거
    */
-  removeAllListeners(): void {
+  static removeLocationListener(): void {
     if (this.locationListener) {
       this.locationListener.remove()
       this.locationListener = null
     }
+  }
+
+  /**
+   * 에러 리스너 제거
+   */
+  static removeErrorListener(): void {
     if (this.errorListener) {
       this.errorListener.remove()
       this.errorListener = null
     }
-    if (this.authListener) {
-      this.authListener.remove()
-      this.authListener = null
+  }
+
+  /**
+   * 권한 리스너 제거
+   */
+  static removeAuthorizationListener(): void {
+    if (this.authorizationListener) {
+      this.authorizationListener.remove()
+      this.authorizationListener = null
     }
-    this.isListenersReady = false
+  }
+
+  /**
+   * 모든 리스너 제거
+   */
+  static removeAllListeners(): void {
+    this.removeLocationListener()
+    this.removeErrorListener()
+    this.removeAuthorizationListener()
   }
 }
 
-export default new RidableGpsTracker()
-export * from "./types"
+// 🆕 편의 함수들
+export const GpsTrackerUtils = {
+  /**
+   * m/s를 km/h로 변환
+   */
+  metersPerSecondToKmh(speed: number): number {
+    return speed * 3.6
+  },
+
+  /**
+   * 미터를 킬로미터로 변환
+   */
+  metersToKm(distance: number): string {
+    return (distance / 1000).toFixed(2)
+  },
+
+  /**
+   * 초를 분:초 형식으로 변환
+   */
+  secondsToMinutesSeconds(seconds: number): string {
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, "0")}`
+  },
+
+  /**
+   * 초를 시:분:초 형식으로 변환
+   */
+  secondsToHMS(seconds: number): string {
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    const secs = Math.floor(seconds % 60)
+
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+    }
+    return `${minutes}:${secs.toString().padStart(2, "0")}`
+  },
+
+  /**
+   * 페이스 계산 (분/km)
+   */
+  calculatePace(speedMs: number): string {
+    if (speedMs <= 0) return "--:--"
+    const paceMinPerKm = 1000 / (speedMs * 60)
+    const mins = Math.floor(paceMinPerKm)
+    const secs = Math.floor((paceMinPerKm - mins) * 60)
+    return `${mins}:${secs.toString().padStart(2, "0")}`
+  },
+
+  /**
+   * 이동 효율성 계산 (%)
+   */
+  calculateEfficiency(movingTime: number, elapsedTime: number): number {
+    if (elapsedTime === 0) return 0
+    return (movingTime / elapsedTime) * 100
+  },
+
+  /**
+   * Grade 이모지 가져오기
+   */
+  getGradeEmoji(grade: number): string {
+    const absGrade = Math.abs(grade)
+    if (absGrade < 2) return "➡️"
+    if (grade > 0) {
+      if (absGrade < 5) return "⬆️"
+      if (absGrade < 8) return "↗️"
+      if (absGrade < 12) return "⏫"
+      return "🔺"
+    } else {
+      if (absGrade < 5) return "⬇️"
+      if (absGrade < 8) return "↘️"
+      if (absGrade < 12) return "⏬"
+      return "🔻"
+    }
+  },
+}
+
+export default GpsTracker
