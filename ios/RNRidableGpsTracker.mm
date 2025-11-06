@@ -1,12 +1,6 @@
 #import "RNRidableGpsTracker.h"
 #import <CoreLocation/CoreLocation.h>
 #import <React/RCTLog.h>
-#import <React/RCTBridge.h>
-#import <React/RCTEventEmitter.h>
-
-#ifdef RCT_NEW_ARCH_ENABLED
-#import <RNRidableGpsTrackerSpec/RNRidableGpsTrackerSpec.h>
-#endif
 
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
 @property (nonatomic, strong) CLLocationManager *locationManager;
@@ -15,12 +9,10 @@
 @property (nonatomic, assign) CLLocationDistance distanceFilter;
 @property (nonatomic, assign) CLLocationAccuracy desiredAccuracy;
 @property (nonatomic, assign) BOOL hasListeners;
+@property (nonatomic, strong) NSTimer *repeatLocationTimer;
 @end
 
 @implementation RNRidableGpsTracker
-{
-    bool _hasListeners;
-}
 
 RCT_EXPORT_MODULE()
 
@@ -58,17 +50,19 @@ RCT_EXPORT_MODULE()
 
 - (void)startObserving
 {
-    _hasListeners = YES;
+    self.hasListeners = YES;
+    RCTLogInfo(@"[RNRidableGpsTracker] ✅ startObserving called - listeners are now active");
 }
 
 - (void)stopObserving
 {
-    _hasListeners = NO;
+    self.hasListeners = NO;
+    RCTLogInfo(@"[RNRidableGpsTracker] stopObserving called - listeners are now inactive");
 }
 
 RCT_EXPORT_METHOD(configure:(NSDictionary *)config
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
 {
     if (config[@"distanceFilter"]) {
         self.distanceFilter = [config[@"distanceFilter"] doubleValue];
@@ -116,7 +110,7 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
 }
 
 RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+                  reject:(RCTPromiseRejectBlock)reject)
 {
     CLAuthorizationStatus authStatus;
     if (@available(iOS 14.0, *)) {
@@ -130,21 +124,30 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
         return;
     }
     
-    self.isTracking = YES;
-    [self.locationManager startUpdatingLocation];
-    resolve(nil);
+    RCTLogInfo(@"[RNRidableGpsTracker] Starting GPS tracking, hasListeners: %d", self.hasListeners);
+    
+    // 짧은 대기 시간 후 시작 (JS 리스너 등록 완료 보장)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        self.isTracking = YES;
+        [self.locationManager startUpdatingLocation];
+        [self startRepeatLocationUpdates];
+        RCTLogInfo(@"[RNRidableGpsTracker] ✅ GPS tracking started, hasListeners: %d", self.hasListeners);
+        resolve(nil);
+    });
 }
 
 RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+                  reject:(RCTPromiseRejectBlock)reject)
 {
     self.isTracking = NO;
     [self.locationManager stopUpdatingLocation];
+    [self stopRepeatLocationUpdates];
+    RCTLogInfo(@"[RNRidableGpsTracker] GPS tracking stopped");
     resolve(nil);
 }
 
 RCT_EXPORT_METHOD(getCurrentLocation:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+                  reject:(RCTPromiseRejectBlock)reject)
 {
     if (self.lastLocation) {
         resolve([self convertLocationToDict:self.lastLocation]);
@@ -154,7 +157,7 @@ RCT_EXPORT_METHOD(getCurrentLocation:(RCTPromiseResolveBlock)resolve
 }
 
 RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+                  reject:(RCTPromiseRejectBlock)reject)
 {
     CLAuthorizationStatus authStatus;
     if (@available(iOS 14.0, *)) {
@@ -196,7 +199,7 @@ RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
 }
 
 RCT_EXPORT_METHOD(requestPermissions:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
+                  reject:(RCTPromiseRejectBlock)reject)
 {
     [self.locationManager requestAlwaysAuthorization];
     
@@ -222,18 +225,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
     });
 }
 
-RCT_EXPORT_METHOD(addListener:(NSString *)eventName)
-{
-    // This is required for RN built-in EventEmitter support
-    _hasListeners = YES;
-}
-
-RCT_EXPORT_METHOD(removeListeners:(double)count)
-{
-    // This is required for RN built-in EventEmitter support
-    _hasListeners = NO;
-}
-
 #pragma mark - CLLocationManagerDelegate
 
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations
@@ -243,21 +234,27 @@ RCT_EXPORT_METHOD(removeListeners:(double)count)
     
     self.lastLocation = location;
     
-    if (self.isTracking && _hasListeners) {
-        NSDictionary *locationDict = [self convertLocationToDict:location];
-        [self sendEventWithName:@"location" body:locationDict];
+    RCTLogInfo(@"[RNRidableGpsTracker] Location update: lat=%.6f, lng=%.6f, tracking=%d, hasListeners=%d",
+               location.coordinate.latitude, location.coordinate.longitude, self.isTracking, self.hasListeners);
+    
+    if (self.isTracking && self.hasListeners) {
+        [self sendEventWithName:@"location" body:[self convertLocationToDict:location]];
+    } else if (self.isTracking && !self.hasListeners) {
+        RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ Location update received but no listeners registered");
     }
 }
 
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error
 {
-    RCTLogError(@"Location manager failed: %@", error.localizedDescription);
+    RCTLogError(@"[RNRidableGpsTracker] Location manager failed: %@", error.localizedDescription);
     
-    if (_hasListeners) {
+    if (self.hasListeners) {
         [self sendEventWithName:@"error" body:@{
             @"code": @(error.code),
             @"message": error.localizedDescription
         }];
+    } else {
+        RCTLogWarn(@"[RNRidableGpsTracker] Error occurred but no listeners registered");
     }
 }
 
@@ -270,9 +267,9 @@ RCT_EXPORT_METHOD(removeListeners:(double)count)
         status = [CLLocationManager authorizationStatus];
     }
     
-    RCTLogInfo(@"Authorization status changed: %d", (int)status);
+    RCTLogInfo(@"[RNRidableGpsTracker] Authorization status changed: %d", (int)status);
     
-    if (_hasListeners) {
+    if (self.hasListeners) {
         NSString *statusString;
         switch (status) {
             case kCLAuthorizationStatusAuthorizedAlways:
@@ -298,6 +295,47 @@ RCT_EXPORT_METHOD(removeListeners:(double)count)
         [self sendEventWithName:@"authorizationChanged" body:@{
             @"status": statusString
         }];
+    } else {
+        RCTLogWarn(@"[RNRidableGpsTracker] Authorization changed but no listeners registered");
+    }
+}
+
+#pragma mark - Repeat Location Updates
+
+- (void)startRepeatLocationUpdates
+{
+    [self stopRepeatLocationUpdates];
+    
+    RCTLogInfo(@"[RNRidableGpsTracker] Starting repeat location updates (1 second interval)");
+    
+    // 메인 스레드에서 타이머 생성
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.repeatLocationTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                                    target:self
+                                                                  selector:@selector(repeatLocationUpdate:)
+                                                                  userInfo:nil
+                                                                   repeats:YES];
+    });
+}
+
+- (void)stopRepeatLocationUpdates
+{
+    if (self.repeatLocationTimer) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.repeatLocationTimer invalidate];
+            self.repeatLocationTimer = nil;
+            RCTLogInfo(@"[RNRidableGpsTracker] Stopped repeat location updates");
+        });
+    }
+}
+
+- (void)repeatLocationUpdate:(NSTimer *)timer
+{
+    // 마지막 위치가 있고 트래킹 중이며 리스너가 있으면 1초마다 전송
+    if (self.lastLocation && self.isTracking && self.hasListeners) {
+        [self sendEventWithName:@"location" body:[self convertLocationToDict:self.lastLocation]];
+    } else if (self.lastLocation && self.isTracking && !self.hasListeners) {
+        RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ Repeat location update skipped - no listeners registered");
     }
 }
 
@@ -315,13 +353,5 @@ RCT_EXPORT_METHOD(removeListeners:(double)count)
         @"timestamp": @([location.timestamp timeIntervalSince1970] * 1000)
     };
 }
-
-#ifdef RCT_NEW_ARCH_ENABLED
-- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
-    (const facebook::react::ObjCTurboModule::InitParams &)params
-{
-    return std::make_shared<facebook::react::NativeRidableGpsTrackerSpecJSI>(params);
-}
-#endif
 
 @end

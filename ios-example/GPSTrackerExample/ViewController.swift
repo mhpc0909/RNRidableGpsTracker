@@ -6,6 +6,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     private let locationManager = CLLocationManager()
     private var isTracking = false
     private var locationHistory: [String] = []
+    private var repeatLocationTimer: Timer?
     
     // UI Elements
     private let scrollView = UIScrollView()
@@ -301,6 +302,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     @objc private func startTracking() {
         locationManager.startUpdatingLocation()
         isTracking = true
+        startRepeatLocationUpdates()
         updateStatus()
         showAlert(title: "Success", message: "GPS 트래킹 시작")
     }
@@ -308,6 +310,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     @objc private func stopTracking() {
         locationManager.stopUpdatingLocation()
         isTracking = false
+        stopRepeatLocationUpdates()
         updateStatus()
         showAlert(title: "Success", message: "GPS 트래킹 중지")
     }
@@ -386,5 +389,33 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         updateStatus()
+    }
+    
+    // MARK: - Repeat Location Updates
+    
+    private func startRepeatLocationUpdates() {
+        stopRepeatLocationUpdates()
+        
+        print("[GPS Tracker] Starting repeat location updates (1 second interval)")
+        
+        repeatLocationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.repeatLocationUpdate()
+        }
+    }
+    
+    private func stopRepeatLocationUpdates() {
+        repeatLocationTimer?.invalidate()
+        repeatLocationTimer = nil
+        print("[GPS Tracker] Stopped repeat location updates")
+    }
+    
+    private func repeatLocationUpdate() {
+        // 마지막 위치를 가져와서 업데이트
+        if let lastLocation = locationManager.location, isTracking {
+            print("[GPS Tracker] Repeating last location (for 1-second interval)")
+            updateLocationDisplay(lastLocation)
+            addToHistory(lastLocation)
+        }
     }
 }
