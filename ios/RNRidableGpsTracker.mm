@@ -124,17 +124,32 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
         self.locationManager.pausesLocationUpdatesAutomatically = [config[@"pausesLocationUpdatesAutomatically"] boolValue];
     }
     
-    if (config[@"activityType"]) {
-        NSString *activityType = config[@"activityType"];
-        if ([activityType isEqualToString:@"fitness"]) {
+    // 🆕 exerciseType 처리
+    if (config[@"exerciseType"]) {
+        NSString *exerciseType = config[@"exerciseType"];
+        
+        if ([exerciseType isEqualToString:@"bicycle"]) {
+            // 자전거 설정
             self.locationManager.activityType = CLActivityTypeFitness;
-        } else if ([activityType isEqualToString:@"automotiveNavigation"]) {
-            self.locationManager.activityType = CLActivityTypeAutomotiveNavigation;
-        } else if ([activityType isEqualToString:@"otherNavigation"]) {
-            self.locationManager.activityType = CLActivityTypeOtherNavigation;
-        } else {
-            self.locationManager.activityType = CLActivityTypeOther;
+            // 필요한 추가 설정
+        } else if ([exerciseType isEqualToString:@"running"]) {
+            // 러닝 설정
+            self.locationManager.activityType = CLActivityTypeFitness;
+        } else if ([exerciseType isEqualToString:@"hiking"]) {
+            // 하이킹 설정
+            self.locationManager.activityType = CLActivityTypeFitness;
+        } else if ([exerciseType isEqualToString:@"walking"]) {
+            // 걷기 설정
+            self.locationManager.activityType = CLActivityTypeFitness;
         }
+        
+        // 기본값 처리 (없으면 bicycle)
+        if (!exerciseType) {
+            exerciseType = @"bicycle";
+        }
+    } else {
+        // 기본값: bicycle
+        self.locationManager.activityType = CLActivityTypeFitness;
     }
     
     resolve(nil);

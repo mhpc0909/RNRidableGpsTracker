@@ -237,20 +237,35 @@ class LocationService : Service(), SensorEventListener {
 
     fun configure(
         distanceFilter: Float,
-        updateInterval: Long,
+        interval: Long,
         fastestInterval: Long,
-        desiredAccuracy: String
+        desiredAccuracy: String,
+        exerciseType: String = "bicycle"  // 🆕 기본값 bicycle
     ) {
         this.distanceFilter = distanceFilter
-        this.updateInterval = updateInterval
+        this.updateInterval = interval
         this.fastestInterval = fastestInterval
-        this.priority = when (desiredAccuracy) {
-            "high" -> Priority.PRIORITY_HIGH_ACCURACY
-            "medium" -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
-            "low" -> Priority.PRIORITY_LOW_POWER
-            else -> Priority.PRIORITY_HIGH_ACCURACY
+        
+        when (exerciseType) {
+            "bicycle" -> {
+                // 자전거 특화 설정
+                this.priority = Priority.PRIORITY_HIGH_ACCURACY
+            }
+            "running" -> {
+                // 러닝 특화 설정
+                this.priority = Priority.PRIORITY_HIGH_ACCURACY
+            }
+            "hiking" -> {
+                // 하이킹 특화 설정
+                this.priority = Priority.PRIORITY_HIGH_ACCURACY
+            }
+            "walking" -> {
+                // 걷기 특화 설정
+                this.priority = Priority.PRIORITY_BALANCED_POWER_ACCURACY
+            }
         }
-        Log.d(TAG, "Configured: distance=$distanceFilter, interval=$updateInterval, priority=$priority")
+        
+        Log.d(TAG, "Configured: distance=$distanceFilter, interval=$interval, priority=$priority")
     }
 
     fun startForegroundTracking() {

@@ -87,14 +87,38 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 config.getString("desiredAccuracy") ?: "high"
             } else "high"
 
+            // 🆕 exerciseType 처리
+            val exerciseType = if (config.hasKey("exerciseType")) {
+                config.getString("exerciseType") ?: "bicycle"
+            } else {
+                "bicycle"  // 기본값
+            }
+            
+            when (exerciseType) {
+                "bicycle" -> {
+                    // 자전거 설정
+                    // 필요한 설정 적용
+                }
+                "running" -> {
+                    // 러닝 설정
+                }
+                "hiking" -> {
+                    // 하이킹 설정
+                }
+                "walking" -> {
+                    // 걷기 설정
+                }
+            }
+
             locationService?.configure(
                 distanceFilter,
                 interval,
                 fastestInterval,
-                desiredAccuracy
+                desiredAccuracy,
+                exerciseType  // 🆕 exerciseType 전달
             )
 
-            Log.d(TAG, "Configuration applied")
+            Log.d(TAG, "Configuration applied with exerciseType: $exerciseType")
             promise.resolve(null)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to configure", e)

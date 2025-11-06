@@ -2,7 +2,17 @@ import type { TurboModule } from "react-native"
 import { TurboModuleRegistry } from "react-native"
 
 export interface Spec extends TurboModule {
-  configure(config: { distanceFilter?: number; desiredAccuracy?: string; interval?: number; fastestInterval?: number; activityType?: string; allowsBackgroundLocationUpdates?: boolean; showsBackgroundLocationIndicator?: boolean; pausesLocationUpdatesAutomatically?: boolean }): Promise<void>
+  configure(config: {
+    distanceFilter?: number
+    desiredAccuracy?: string
+    interval?: number
+    fastestInterval?: number
+    activityType?: string
+    exerciseType?: string // 🆕 운동 유형 추가
+    allowsBackgroundLocationUpdates?: boolean
+    showsBackgroundLocationIndicator?: boolean
+    pausesLocationUpdatesAutomatically?: boolean
+  }): Promise<void>
 
   start(): Promise<void>
   stop(): Promise<void>

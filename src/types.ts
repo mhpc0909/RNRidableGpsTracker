@@ -12,6 +12,13 @@ export interface LocationData {
   isNewLocation: boolean // 🆕 새로운 GPS 데이터 여부 (true: 새 데이터, false: 반복 데이터)
 }
 
+export enum ExerciseType {
+  BICYCLE = "bicycle", // 자전거
+  RUNNING = "running", // 러닝
+  HIKING = "hiking", // 하이킹
+  WALKING = "walking", // 걷기
+}
+
 export interface LocationConfig {
   // Distance filter in meters
   distanceFilter?: number
@@ -23,6 +30,8 @@ export interface LocationConfig {
   fastestInterval?: number
   // Activity type for iOS
   activityType?: "fitness" | "automotiveNavigation" | "otherNavigation" | "other"
+  // Exercise type
+  exerciseType?: ExerciseType
   // Enable background location updates
   allowsBackgroundLocationUpdates?: boolean
   // Show background location indicator (iOS 11+)
