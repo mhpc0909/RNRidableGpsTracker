@@ -141,8 +141,6 @@ class RidableGpsTracker {
     this.authListener = eventEmitter.addListener("authorizationChanged", callback)
     this.isListenersReady = true
 
-    console.log("[RidableGpsTracker] ✅ Authorization listener registered")
-
     return () => {
       if (this.authListener) {
         this.authListener.remove()
@@ -150,7 +148,6 @@ class RidableGpsTracker {
         if (!this.locationListener && !this.errorListener) {
           this.isListenersReady = false
         }
-        console.log("[RidableGpsTracker] Authorization listener removed")
       }
     }
   }
@@ -172,7 +169,6 @@ class RidableGpsTracker {
       this.authListener = null
     }
     this.isListenersReady = false
-    console.log("[RidableGpsTracker] All listeners removed")
   }
 }
 

@@ -22,6 +22,8 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
 
     private var locationService: LocationService? = null
     private var serviceBound = false
+    private var lastLocationTimestamp: Long = 0
+    
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             Log.d(TAG, "Service connected")
@@ -29,8 +31,8 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             locationService = binder.getService()
             serviceBound = true
             
-            locationService?.setLocationListener { location ->
-                sendLocationEvent(location)
+            locationService?.setLocationListener { location, barometerData ->
+                sendLocationEvent(location, barometerData)
             }
         }
 
@@ -160,8 +162,10 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
     override fun getCurrentLocation(promise: Promise) {
         try {
             val location = locationService?.getLastLocation()
+            val barometerData = locationService?.getLastBarometerData()
+            
             if (location != null) {
-                promise.resolve(convertLocationToMap(location))
+                promise.resolve(convertLocationToMap(location, barometerData, isNew = false))
             } else {
                 promise.reject("NO_LOCATION", "No location available")
             }
@@ -177,6 +181,7 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                 putBoolean("isRunning", locationService?.isTracking() ?: false)
                 putBoolean("isAuthorized", hasLocationPermission())
                 putString("authorizationStatus", getAuthorizationStatus())
+                putBoolean("isBarometerAvailable", locationService?.isBarometerAvailable() ?: false)
             }
             promise.resolve(status)
         } catch (e: Exception) {
@@ -208,6 +213,14 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
         Log.d(TAG, "Removing $count listeners")
     }
 
+    override fun enableListeners() {
+        Log.d(TAG, "enableListeners called")
+    }
+
+    override fun disableListeners() {
+        Log.d(TAG, "disableListeners called")
+    }
+
     private fun hasLocationPermission(): Boolean {
         val fineLocation = ContextCompat.checkSelfPermission(
             reactApplicationContext,
@@ -230,23 +243,41 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun convertLocationToMap(location: Location): WritableMap {
+    private fun convertLocationToMap(
+        location: Location, 
+        barometerData: LocationService.BarometerData?,
+        isNew: Boolean
+    ): WritableMap {
         return Arguments.createMap().apply {
             putDouble("latitude", location.latitude)
             putDouble("longitude", location.longitude)
-            putDouble("altitude", location.altitude)
+            putDouble("altitude", location.altitude)  // GPS 기반 고도
             putDouble("accuracy", location.accuracy.toDouble())
             putDouble("speed", if (location.hasSpeed()) location.speed.toDouble() else 0.0)
             putDouble("bearing", if (location.hasBearing()) location.bearing.toDouble() else 0.0)
             putDouble("timestamp", location.time.toDouble())
+            putBoolean("isNewLocation", isNew)  // 🆕 새 위치 데이터 여부
+            
+            // 기압계 데이터 추가
+            barometerData?.let { data ->
+                putDouble("enhancedAltitude", data.enhancedAltitude.toDouble())  // 보정된 고도
+                putDouble("relativeAltitude", data.relativeAltitude.toDouble())  // 상대 고도
+                putDouble("pressure", data.pressure.toDouble())  // 기압 (hPa)
+            }
         }
     }
 
-    private fun sendLocationEvent(location: Location) {
+    private fun sendLocationEvent(location: Location, barometerData: LocationService.BarometerData?) {
         try {
+            // 새로운 위치인지 확인 (timestamp 비교)
+            val isNew = location.time != lastLocationTimestamp
+            if (isNew) {
+                lastLocationTimestamp = location.time
+            }
+            
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit("location", convertLocationToMap(location))
+                .emit("location", convertLocationToMap(location, barometerData, isNew))
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send location event", e)
         }

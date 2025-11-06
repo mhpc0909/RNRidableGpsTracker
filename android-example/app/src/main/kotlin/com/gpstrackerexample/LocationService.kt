@@ -1,10 +1,16 @@
-package com.gpstrackerexample
+package com.rnridablegpstracker
 
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.os.Binder
 import android.os.Build
@@ -14,19 +20,37 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
+import kotlin.math.pow
 
-class LocationService : Service() {
+class LocationService : Service(), SensorEventListener {
 
     private val binder = LocalBinder()
     private var fusedLocationClient: FusedLocationProviderClient? = null
     private var locationCallback: LocationCallback? = null
     private var lastLocation: Location? = null
-    private var locationListener: ((Location) -> Unit)? = null
+    private var locationListener: ((Location, BarometerData?) -> Unit)? = null
     private var isForegroundStarted = false
+    private var isNewLocationAvailable = false
+    
+    // 기압계 관련
+    private var sensorManager: SensorManager? = null
+    private var pressureSensor: Sensor? = null
+    private var referencePressure: Float? = null  // 시작점 기압
+    private var currentPressure: Float? = null
+    private var relativeAltitude: Float = 0f
+    
+    // 🆕 칼만 필터 관련
+    private var startGpsAltitude: Float? = null
+    private var enhancedAltitude: Float = 0f
+    
+    // 🆕 가중치 (조정 가능)
+    private val GPS_WEIGHT = 0.3f  // GPS 신뢰도
+    private val BARO_WEIGHT = 0.7f  // 기압계 신뢰도 (단기 변화에 민감)
     
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
     private var repeatLocationRunnable: Runnable? = null
+    private var lastSendTime: Long = 0
     
     // Configuration
     private var distanceFilter: Float = 0f
@@ -36,11 +60,20 @@ class LocationService : Service() {
 
     companion object {
         private const val TAG = "LocationService"
-        private const val CHANNEL_ID = "gps_tracker_example"
+        private const val CHANNEL_ID = "ridable_location_tracking"
         private const val NOTIFICATION_ID = 9999
-        const val ACTION_START = "com.gpstrackerexample.ACTION_START"
-        const val ACTION_STOP = "com.gpstrackerexample.ACTION_STOP"
+        const val ACTION_START = "com.rnridablegpstracker.ACTION_START"
+        const val ACTION_STOP = "com.rnridablegpstracker.ACTION_STOP"
+        
+        // 기압-고도 변환 상수 (해수면 기압 기준)
+        private const val SEA_LEVEL_PRESSURE = 1013.25f  // hPa
     }
+    
+    data class BarometerData(
+        val pressure: Float,              // 현재 기압 (hPa)
+        val relativeAltitude: Float,      // 상대 고도 (m)
+        val enhancedAltitude: Float       // 보정된 고도 (m) - 칼만 필터 적용
+    )
 
     inner class LocalBinder : Binder() {
         fun getService(): LocationService = this@LocationService
@@ -51,6 +84,7 @@ class LocationService : Service() {
         Log.d(TAG, "Service onCreate")
         createNotificationChannel()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        setupBarometer()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -75,6 +109,84 @@ class LocationService : Service() {
         return START_STICKY
     }
 
+    private fun setupBarometer() {
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        pressureSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_PRESSURE)
+        
+        if (pressureSensor != null) {
+            Log.d(TAG, "✅ Barometer sensor available: ${pressureSensor!!.name}")
+        } else {
+            Log.w(TAG, "⚠️ Barometer sensor not available on this device")
+        }
+    }
+
+    private fun startBarometer() {
+        pressureSensor?.let { sensor ->
+            // 기압 센서 리스너 등록 (SENSOR_DELAY_NORMAL = ~200ms)
+            sensorManager?.registerListener(
+                this,
+                sensor,
+                SensorManager.SENSOR_DELAY_NORMAL
+            )
+            Log.d(TAG, "Barometer started")
+        }
+    }
+
+    private fun stopBarometer() {
+        pressureSensor?.let {
+            sensorManager?.unregisterListener(this)
+            referencePressure = null
+            currentPressure = null
+            relativeAltitude = 0f
+            // 🆕 칼만 필터 변수 초기화
+            startGpsAltitude = null
+            enhancedAltitude = 0f
+            Log.d(TAG, "Barometer stopped")
+        }
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type == Sensor.TYPE_PRESSURE) {
+            val pressure = event.values[0]  // hPa (hectopascals)
+            currentPressure = pressure
+            
+            // 첫 기압 측정 시 기준점으로 설정
+            if (referencePressure == null) {
+                referencePressure = pressure
+                Log.d(TAG, "Reference pressure set: $pressure hPa")
+            }
+            
+            // 기압 차이로 상대 고도 계산
+            // 고도 = 44330 * (1 - (P/P0)^0.1903)
+            referencePressure?.let { refPressure ->
+                relativeAltitude = 44330f * (1f - (pressure / refPressure).pow(0.1903f))
+                
+                // 🆕 칼만 필터 융합 (GPS와 기압계 데이터 결합)
+                lastLocation?.let { location ->
+                    if (location.hasAltitude() && startGpsAltitude != null) {
+                        val gpsAlt = location.altitude.toFloat()
+                        
+                        // 기압계 기반 절대 고도 = 시작 GPS 고도 + 상대 변화량
+                        val baroAltitude = startGpsAltitude!! + relativeAltitude
+                        
+                        // 칼만 필터: GPS(30%) + 기압계(70%) 가중 평균
+                        enhancedAltitude = (gpsAlt * GPS_WEIGHT) + (baroAltitude * BARO_WEIGHT)
+                        
+                        Log.d(TAG, "📊 Altitude fusion: GPS=${String.format("%.1f", gpsAlt)}m, " +
+                                "Baro=${String.format("%.1f", baroAltitude)}m, " +
+                                "Enhanced=${String.format("%.1f", enhancedAltitude)}m")
+                    }
+                }
+                
+                Log.d(TAG, "Barometer: pressure=$pressure hPa, relative altitude=$relativeAltitude m")
+            }
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // 정확도 변경 시 (필요시 처리)
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -95,17 +207,25 @@ class LocationService : Service() {
     private fun createNotification(): Notification {
         val locationText = if (lastLocation != null) {
             val provider = if (lastLocation!!.provider != null) lastLocation!!.provider else "unknown"
+            val barometerText = currentPressure?.let { 
+                "\nPressure: ${String.format("%.1f", it)} hPa" +
+                "\nGPS Alt: ${String.format("%.1f", lastLocation!!.altitude)}m" +
+                "\nEnhanced Alt: ${String.format("%.1f", enhancedAltitude)}m" +  // 🆕
+                "\nAlt Δ: ${String.format("%.1f", relativeAltitude)}m"
+            } ?: ""
+            
             "Provider: $provider\n" +
             "Lat: ${String.format("%.6f", lastLocation!!.latitude)}\n" +
             "Lng: ${String.format("%.6f", lastLocation!!.longitude)}\n" +
             "Speed: ${String.format("%.1f", if (lastLocation!!.hasSpeed()) lastLocation!!.speed * 3.6 else 0f)} km/h\n" +
-            "Accuracy: ${String.format("%.1f", lastLocation!!.accuracy)}m"
+            "Accuracy: ${String.format("%.1f", lastLocation!!.accuracy)}m" +
+            barometerText
         } else {
             "Waiting for GPS signal..."
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("🚴 GPS Tracking (Exercise Mode)")
+            .setContentTitle("🚴 GPS Tracking Active")
             .setContentText(locationText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(locationText))
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
@@ -161,9 +281,17 @@ class LocationService : Service() {
                     locationResult.lastLocation?.let { location ->
                         // GPS Provider만 사용 (선택적 필터링)
                         if (location.provider == "gps" || location.provider == "fused") {
+                            // 🆕 첫 GPS 고도를 기준점으로 설정
+                            if (startGpsAltitude == null && location.hasAltitude()) {
+                                startGpsAltitude = location.altitude.toFloat()
+                                enhancedAltitude = startGpsAltitude!!
+                                Log.d(TAG, "🎯 Start GPS altitude set: ${startGpsAltitude}m")
+                            }
+                            
                             lastLocation = location
-                            Log.d(TAG, "GPS Location received: provider=${location.provider}, lat=${location.latitude}, lng=${location.longitude}, speed=${location.speed}, accuracy=${location.accuracy}m")
-                            sendLocationUpdate(location)
+                            isNewLocationAvailable = true
+                            
+                            Log.d(TAG, "🆕 NEW GPS Location received: provider=${location.provider}, lat=${location.latitude}, lng=${location.longitude}")
                         } else {
                             Log.d(TAG, "Ignoring non-GPS location from provider: ${location.provider}")
                         }
@@ -177,6 +305,9 @@ class LocationService : Service() {
                 locationCallback!!,
                 Looper.getMainLooper()
             )
+
+            // 기압계 시작
+            startBarometer()
 
             // 마지막 위치를 1초마다 반복 전송하는 Runnable 시작
             startRepeatLocationUpdates()
@@ -198,21 +329,43 @@ class LocationService : Service() {
     private fun startRepeatLocationUpdates() {
         Log.d(TAG, "Starting repeat location updates (1 second interval)")
         
+        lastSendTime = System.currentTimeMillis()
+        
         repeatLocationRunnable = object : Runnable {
             override fun run() {
-                // 마지막 GPS 위치가 있으면 1초마다 전송
-                lastLocation?.let { location ->
-                    Log.d(TAG, "Repeating last GPS location (for 1-second interval)")
-                    sendLocationUpdate(location)
+                // 추적 중이 아니면 중단
+                if (!isForegroundStarted) {
+                    Log.d(TAG, "⚠️ Tracking stopped - cancelling repeat updates")
+                    return
                 }
                 
-                // 1초 후 다시 실행
-                handler.postDelayed(this, 1000L)
+                val now = System.currentTimeMillis()
+                val elapsed = now - lastSendTime
+                
+                // 1초 이상 경과했을 때만 전송
+                if (elapsed >= 1000) {
+                    lastLocation?.let { location ->
+                        val isNew = isNewLocationAvailable
+                        if (isNew) {
+                            Log.d(TAG, "🆕 Sending NEW location data")
+                        }
+                        sendLocationUpdate(location, isNew = isNew)
+                        if (isNew) {
+                            isNewLocationAvailable = false
+                        }
+                        lastSendTime = now
+                    }
+                }
+                
+                // 다음 실행 예약 (추적 중일 때만)
+                if (isForegroundStarted) {
+                    handler.postDelayed(this, 1000L)
+                }
             }
         }
         
-        // 즉시 시작
-        handler.post(repeatLocationRunnable!!)
+        // 1초 후 시작
+        handler.postDelayed(repeatLocationRunnable!!, 1000L)
     }
 
     private fun stopRepeatLocationUpdates() {
@@ -223,22 +376,46 @@ class LocationService : Service() {
         repeatLocationRunnable = null
     }
 
-    private fun sendLocationUpdate(location: Location) {
-        locationListener?.invoke(location)
+    private fun sendLocationUpdate(location: Location, isNew: Boolean) {
+        // 추적 중이 아니면 전송하지 않음
+        if (!isForegroundStarted) {
+            Log.d(TAG, "⚠️ Not tracking - skipping location update")
+            return
+        }
+        
+        val barometerData = currentPressure?.let { pressure ->
+            BarometerData(
+                pressure = pressure,
+                relativeAltitude = relativeAltitude,
+                enhancedAltitude = enhancedAltitude  // 🆕 칼만 필터 융합 고도
+            )
+        }
+        
+        locationListener?.invoke(location, barometerData)
         updateNotification()
     }
 
     fun stopForegroundTracking() {
         Log.d(TAG, "Stopping GPS tracking")
         
+        // 🔥 먼저 리스너 제거 (이벤트 전송 중지)
+        removeLocationListener()
+        
         // 반복 업데이트 중지
         stopRepeatLocationUpdates()
+        
+        // 기압계 중지
+        stopBarometer()
         
         locationCallback?.let {
             fusedLocationClient?.removeLocationUpdates(it)
             Log.d(TAG, "GPS location updates removed")
         }
         locationCallback = null
+        
+        // 데이터 초기화
+        lastLocation = null
+        isNewLocationAvailable = false
         
         if (isForegroundStarted) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -252,7 +429,7 @@ class LocationService : Service() {
         }
     }
 
-    fun setLocationListener(listener: (Location) -> Unit) {
+    fun setLocationListener(listener: (Location, BarometerData?) -> Unit) {
         locationListener = listener
         Log.d(TAG, "Location listener set")
     }
@@ -263,6 +440,18 @@ class LocationService : Service() {
     }
 
     fun getLastLocation(): Location? = lastLocation
+    
+    fun getLastBarometerData(): BarometerData? {
+        return currentPressure?.let { pressure ->
+            BarometerData(
+                pressure = pressure,
+                relativeAltitude = relativeAltitude,
+                enhancedAltitude = enhancedAltitude  // 🆕
+            )
+        }
+    }
+    
+    fun isBarometerAvailable(): Boolean = pressureSensor != null
 
     fun isTracking(): Boolean = isForegroundStarted
 
@@ -278,5 +467,14 @@ class LocationService : Service() {
         super.onDestroy()
         Log.d(TAG, "Service onDestroy")
         stopForegroundTracking()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.d(TAG, "⚠️ App task removed - stopping tracking service")
+        
+        // 앱이 종료되면 추적도 중지
+        stopForegroundTracking()
+        stopSelf()
     }
 }
