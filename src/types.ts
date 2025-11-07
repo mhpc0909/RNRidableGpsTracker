@@ -1,6 +1,6 @@
 // RNRidableGpsTracker 타입 정의
 
-// 운동 타입 (enum 방식 - 기존 코드 호환성)
+// 운동 타입 (enum 방식)
 export enum ExerciseType {
   BICYCLE = "bicycle",
   RUNNING = "running",
@@ -17,37 +17,49 @@ export interface GpsTrackerConfig {
   fastestInterval?: number
   desiredAccuracy?: "high" | "medium" | "low"
   exerciseType?: ExerciseType
-  advancedTracking?: boolean // 🆕 고급 센서 추적
+  // 🆕 개별 센서 제어
+  useAccelerometer?: boolean // 가속계 (진동, 경사 분석)
+  useGyroscope?: boolean // 자이로스코프 (코너링 분석)
+  useMagnetometer?: boolean // 자기장 센서 (방향, 자기장 강도)
+  useLight?: boolean // 광센서 (조도 측정)
+  useNoise?: boolean // 소음 측정 (RECORD_AUDIO 권한 필요)
   allowsBackgroundLocationUpdates?: boolean
   showsBackgroundLocationIndicator?: boolean
   pausesLocationUpdatesAutomatically?: boolean
 }
 
-// 🆕 가속계 데이터
-export interface AccelerometerData {
-  x: number // X축 가속도 (m/s²)
-  y: number // Y축 가속도 (m/s²)
-  z: number // Z축 가속도 (m/s²)
-  magnitude: number // 전체 가속도 크기
-}
-
-// 🆕 자이로스코프 데이터
-export interface GyroscopeData {
-  x: number // X축 회전 속도 (rad/s)
-  y: number // Y축 회전 속도 (rad/s)
-  z: number // Z축 회전 속도 (rad/s)
-  rotationRate: number // 전체 회전 속도
-}
-
 // 🆕 운동 분석 데이터
 export interface MotionAnalysis {
   roadSurfaceQuality: RoadSurfaceQuality // 노면 품질
-  vibrationIntensity: number // 진동 강도 (0.0 ~ 1.0)
+  vibrationLevel: number // 원본 진동 수치 (m/s²)
+  vibrationIntensity: number // 정규화된 진동 강도 (0.0 ~ 1.0)
   corneringIntensity: number // 코너링 강도 (0.0 ~ 1.0)
   inclineAngle: number // 경사각 (-90 ~ 90 도)
   isClimbing: boolean // 오르막 여부
   isDescending: boolean // 내리막 여부
   verticalAcceleration: number // 수직 가속도 (m/s²)
+}
+
+// 🆕 자기장 센서 데이터
+export interface MagnetometerData {
+  heading: number // 방향 (0-360도, 자북 기준)
+  magneticFieldStrength: number // 자기장 강도 (μT)
+  x: number // X축 자기장
+  y: number // Y축 자기장
+  z: number // Z축 자기장
+}
+
+// 🆕 광센서 데이터
+export interface LightData {
+  lux: number // 조도 (lux)
+  condition: "dark" | "dim" | "indoor" | "overcast" | "daylight" | "bright_sunlight" // 조도 상태
+  isLowLight: boolean // 어두움 여부 (< 50 lux)
+}
+
+// 🆕 소음 데이터
+export interface NoiseData {
+  decibel: number // 소음 레벨 (dB)
+  noiseLevel: "very_quiet" | "quiet" | "moderate" | "noisy" | "very_noisy" | "dangerously_loud" // 소음 상태
 }
 
 // 🆕 세션 통계 데이터
@@ -72,18 +84,18 @@ export interface LocationData {
   timestamp: number
   isNewLocation: boolean
   isKalmanFiltered: boolean
-  isMoving: boolean // 🆕 이동 상태 (속도 >= 0.5 m/s)
+  isMoving: boolean // 이동 상태 (속도 >= 0.5 m/s)
 
   // 기압계 데이터 (선택적)
   enhancedAltitude?: number // GPS + 기압계 보정 고도
   relativeAltitude?: number // 상대 고도 변화
   pressure?: number // 기압 (hPa)
 
-  // 🆕 Grade 데이터
+  // Grade 데이터
   grade?: number // 경사도 (%)
   gradeCategory?: GradeCategory // 경사도 카테고리
 
-  // 🆕 세션 통계
+  // 세션 통계
   sessionDistance?: number
   sessionElevationGain?: number
   sessionElevationLoss?: number
@@ -93,14 +105,17 @@ export interface LocationData {
   sessionAvgSpeed?: number
   sessionMovingAvgSpeed?: number
 
-  // 🆕 가속계 데이터 (advancedTracking=true일 때만)
-  accelerometer?: AccelerometerData
-
-  // 🆕 자이로스코프 데이터 (advancedTracking=true일 때만)
-  gyroscope?: GyroscopeData
-
-  // 🆕 운동 분석 데이터 (advancedTracking=true일 때만)
+  // 🆕 운동 분석 데이터 (가속계/자이로 사용 시)
   motionAnalysis?: MotionAnalysis
+
+  // 🆕 자기장 센서 데이터 (useMagnetometer=true일 때)
+  magnetometer?: MagnetometerData
+
+  // 🆕 광센서 데이터 (useLight=true일 때)
+  light?: LightData
+
+  // 🆕 소음 데이터 (useNoise=true일 때)
+  noise?: NoiseData
 }
 
 export interface TrackerStatus {
@@ -108,11 +123,17 @@ export interface TrackerStatus {
   isAuthorized: boolean
   authorizationStatus: string
   isBarometerAvailable: boolean
-  isAccelerometerAvailable?: boolean // 🆕
-  isGyroscopeAvailable?: boolean // 🆕
+  isAccelerometerAvailable?: boolean
+  isGyroscopeAvailable?: boolean
+  isMagnetometerAvailable?: boolean
   isServiceBound?: boolean
   exerciseType: string
-  advancedTracking?: boolean // 🆕
+  // 🆕 개별 센서 사용 상태
+  useAccelerometer?: boolean
+  useGyroscope?: boolean
+  useMagnetometer?: boolean
+  useLight?: boolean
+  useNoise?: boolean
   isKalmanEnabled?: boolean
   useKalmanFilter?: boolean
 }
@@ -126,9 +147,6 @@ export type AuthorizationChangedCallback = (data: { status: string }) => void
 export class MotionAnalyzer {
   /**
    * 자전거 타기 분석
-   * - 노면 품질: 도로 상태 평가
-   * - 코너링: 급커브 구간 감지
-   * - 경사도: 오르막/내리막 강도 측정
    */
   static analyzeCycling(location: LocationData): {
     roadCondition: string
@@ -148,8 +166,6 @@ export class MotionAnalyzer {
 
   /**
    * 러닝 분석
-   * - 보폭 일관성: 진동 패턴 분석
-   * - 수직 진동: 착지 충격 평가
    */
   static analyzeRunning(location: LocationData): {
     strideConsistency: string
@@ -167,8 +183,6 @@ export class MotionAnalyzer {
 
   /**
    * 하이킹 분석
-   * - 지형 난이도: 진동 + 경사도 종합
-   * - 고도 변화: 상승/하강 추적
    */
   static analyzeHiking(location: LocationData): {
     terrainDifficulty: string
@@ -192,13 +206,10 @@ export class MotionAnalyzer {
 export class SessionAnalyzer {
   /**
    * 이동 효율성 계산 (%)
-   * movingTime / elapsedTime * 100
    */
   static calculateMovingEfficiency(location: LocationData): number | null {
     if (!location.sessionMovingTime || !location.sessionElapsedTime) return null
-
     if (location.sessionElapsedTime === 0) return 0
-
     return (location.sessionMovingTime / location.sessionElapsedTime) * 100
   }
 
@@ -207,39 +218,7 @@ export class SessionAnalyzer {
    */
   static calculateStoppedTime(location: LocationData): number | null {
     if (!location.sessionMovingTime || !location.sessionElapsedTime) return null
-
     return location.sessionElapsedTime - location.sessionMovingTime
-  }
-
-  /**
-   * 평균 속도 비교
-   */
-  static compareAverageSpeeds(location: LocationData): {
-    avgSpeed: number
-    movingAvgSpeed: number
-    difference: number
-    efficiencyLoss: number
-  } | null {
-    if (!location.sessionAvgSpeed || !location.sessionMovingAvgSpeed) return null
-
-    return {
-      avgSpeed: location.sessionAvgSpeed,
-      movingAvgSpeed: location.sessionMovingAvgSpeed,
-      difference: location.sessionMovingAvgSpeed - location.sessionAvgSpeed,
-      efficiencyLoss: ((location.sessionMovingAvgSpeed - location.sessionAvgSpeed) / location.sessionMovingAvgSpeed) * 100,
-    }
-  }
-
-  /**
-   * Grade 기반 난이도 점수 (0-100)
-   */
-  static calculateDifficultyScore(location: LocationData): number | null {
-    if (!location.sessionElevationGain || !location.sessionDistance) return null
-
-    const elevationRatio = (location.sessionElevationGain / location.sessionDistance) * 100
-    const score = Math.min(100, elevationRatio * 10)
-
-    return score
   }
 
   /**
@@ -288,9 +267,7 @@ export class SensorDataProcessor {
     if (!data.motionAnalysis) return null
 
     const { roadSurfaceQuality, vibrationIntensity } = data.motionAnalysis
-
     const baseScore = roadSurfaceQuality === "smooth" ? 90 : roadSurfaceQuality === "rough" ? 60 : 30
-
     const vibrationPenalty = vibrationIntensity * 20
 
     return Math.max(0, Math.min(100, baseScore - vibrationPenalty))
@@ -304,16 +281,14 @@ export class SensorDataProcessor {
 
     const { corneringIntensity } = data.motionAnalysis
     const speedKmh = data.speed * 3.6
-
-    // 속도가 빠를수록, 코너링이 심할수록 위험도 증가
-    const speedFactor = Math.min(speedKmh / 50, 1) // 50km/h 기준
+    const speedFactor = Math.min(speedKmh / 50, 1)
     const risk = corneringIntensity * speedFactor * 100
 
     return Math.min(100, risk)
   }
 
   /**
-   * 칼로리 소모량 추정 (운동 분석 데이터 기반)
+   * 칼로리 소모량 추정
    */
   static estimateCaloriesBurn(data: LocationData, userWeightKg: number): number | null {
     if (!data.sessionElapsedTime) return null
@@ -321,20 +296,14 @@ export class SensorDataProcessor {
     const speedKmh = data.speed * 3.6
     const gradePercent = data.grade || 0
 
-    // MET (Metabolic Equivalent) 계산
     let met = 0
-
     if (speedKmh > 0) {
-      // 기본 MET + 경사도 보정
       met = 3.5 + speedKmh / 10 + Math.abs(gradePercent) / 10
-
-      // 운동 분석 데이터로 추가 보정
       if (data.motionAnalysis) {
         met += data.motionAnalysis.vibrationIntensity * 0.5
       }
     }
 
-    // 칼로리 = MET × 체중(kg) × 시간(시간)
     const hours = data.sessionElapsedTime / 3600
     return met * userWeightKg * hours
   }
@@ -347,7 +316,6 @@ export class GradeAnalyzer {
    */
   static getGradeDescription(grade: number): string {
     const absGrade = Math.abs(grade)
-
     if (absGrade < 2) return "평지"
     if (absGrade < 5) return grade > 0 ? "완만한 오르막" : "완만한 내리막"
     if (absGrade < 8) return grade > 0 ? "중간 오르막" : "중간 내리막"
@@ -360,12 +328,11 @@ export class GradeAnalyzer {
    */
   static getGradeColor(grade: number): string {
     const absGrade = Math.abs(grade)
-
-    if (absGrade < 2) return "#4CAF50" // 녹색
-    if (absGrade < 5) return "#8BC34A" // 연녹색
-    if (absGrade < 8) return "#FFC107" // 노란색
-    if (absGrade < 12) return "#FF9800" // 주황색
-    return "#F44336" // 빨간색
+    if (absGrade < 2) return "#4CAF50"
+    if (absGrade < 5) return "#8BC34A"
+    if (absGrade < 8) return "#FFC107"
+    if (absGrade < 12) return "#FF9800"
+    return "#F44336"
   }
 
   /**
@@ -374,6 +341,141 @@ export class GradeAnalyzer {
   static getGradeDifficulty(grade: number): number {
     const absGrade = Math.abs(grade)
     return Math.min(10, Math.floor(absGrade / 3))
+  }
+}
+
+// 🆕 자기장 센서 분석 도우미
+export class MagnetometerAnalyzer {
+  /**
+   * 방위각을 방향 문자열로 변환
+   */
+  static getDirectionFromHeading(heading: number): string {
+    const directions = ["북", "북동", "동", "남동", "남", "남서", "서", "북서"]
+    const index = Math.round(heading / 45) % 8
+    return directions[index]
+  }
+
+  /**
+   * 방위각 이모지 가져오기
+   */
+  static getDirectionEmoji(heading: number): string {
+    const emojis = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅️", "↖️"]
+    const index = Math.round(heading / 45) % 8
+    return emojis[index]
+  }
+
+  /**
+   * GPS bearing과 자기장 heading 비교
+   */
+  static compareBearingAndHeading(
+    gpsBearing: number,
+    magneticHeading: number
+  ): {
+    difference: number
+    isConsistent: boolean
+    warning: string | null
+  } {
+    let diff = magneticHeading - gpsBearing
+    if (diff > 180) diff -= 360
+    if (diff < -180) diff += 360
+
+    const absDiff = Math.abs(diff)
+
+    return {
+      difference: diff,
+      isConsistent: absDiff < 15,
+      warning: absDiff > 30 ? "자기 간섭 의심 (금속 물체, 전자기기)" : null,
+    }
+  }
+
+  /**
+   * 자기장 세기 평가
+   */
+  static evaluateMagneticFieldStrength(magnitude: number): {
+    strength: string
+    description: string
+    environment: string
+  } {
+    if (magnitude < 25) {
+      return { strength: "매우 약함", description: "자기 간섭 또는 센서 오류", environment: "unknown" }
+    } else if (magnitude < 65) {
+      return { strength: "정상", description: "지구 자기장 정상 범위", environment: "outdoor" }
+    } else if (magnitude < 80) {
+      return { strength: "약간 강함", description: "실내 또는 금속 근처", environment: "indoor" }
+    } else if (magnitude < 150) {
+      return { strength: "강함", description: "금속 구조물 근처 (터널, 철교)", environment: "near_metal_structure" }
+    } else {
+      return { strength: "매우 강함", description: "강한 자기장 감지 (전자기기)", environment: "strong_interference" }
+    }
+  }
+}
+
+// 🆕 광센서 분석 도우미
+export class LightAnalyzer {
+  /**
+   * 조도 설명 가져오기
+   */
+  static getLightDescription(lux: number): string {
+    if (lux < 10) return "어두움 (가로등 없는 밤)"
+    if (lux < 50) return "희미함 (가로등 아래)"
+    if (lux < 200) return "실내 조명"
+    if (lux < 1000) return "흐린 날씨"
+    if (lux < 10000) return "맑은 날씨"
+    return "밝은 햇빛"
+  }
+
+  /**
+   * 야간 라이딩 여부 판단
+   */
+  static isNightRiding(lux: number): boolean {
+    return lux < 50
+  }
+
+  /**
+   * 라이트 권장 여부
+   */
+  static shouldUseLights(lux: number): boolean {
+    return lux < 200
+  }
+}
+
+// 🆕 소음 분석 도우미
+export class NoiseAnalyzer {
+  /**
+   * 소음 설명 가져오기
+   */
+  static getNoiseDescription(decibel: number): string {
+    if (decibel < 30) return "매우 조용함 (도서관)"
+    if (decibel < 50) return "조용함 (일반 대화)"
+    if (decibel < 60) return "보통 (사무실)"
+    if (decibel < 70) return "시끄러움 (번화가)"
+    if (decibel < 85) return "매우 시끄러움 (지하철)"
+    return "위험 수준 (청력 손상 가능)"
+  }
+
+  /**
+   * 귀마개 권장 여부
+   */
+  static shouldUseEarplugs(decibel: number): boolean {
+    return decibel > 85
+  }
+
+  /**
+   * 환경 소음 평가
+   */
+  static evaluateEnvironmentNoise(decibel: number): {
+    level: string
+    recommendation: string
+  } {
+    if (decibel < 50) {
+      return { level: "조용함", recommendation: "쾌적한 라이딩 환경" }
+    } else if (decibel < 70) {
+      return { level: "보통", recommendation: "일반적인 도심 환경" }
+    } else if (decibel < 85) {
+      return { level: "시끄러움", recommendation: "소음이 많은 구간" }
+    } else {
+      return { level: "매우 시끄러움", recommendation: "귀마개 착용 권장" }
+    }
   }
 }
 
@@ -387,7 +489,6 @@ export interface RNRidableGpsTrackerModule {
   requestPermissions(): Promise<boolean>
   openLocationSettings(): void
 
-  // 이벤트 리스너
   addListener(eventName: "location", callback: LocationEventCallback): void
   addListener(eventName: "error", callback: ErrorEventCallback): void
   addListener(eventName: "authorizationChanged", callback: AuthorizationChangedCallback): void
@@ -397,77 +498,27 @@ export interface RNRidableGpsTrackerModule {
 // 사용 예시
 export const UsageExample = {
   /**
-   * 고급 추적 설정 예시
+   * 센서별 설정 예시
    */
-  async setupAdvancedTracking() {
+  async setupSensorTracking() {
     const RNRidableGpsTracker = require("react-native").NativeModules.RNRidableGpsTracker as RNRidableGpsTrackerModule
 
-    // 자전거 모드 + 고급 센서 추적
+    // 자전거 모드 + 센서 개별 제어
     await RNRidableGpsTracker.configure({
       exerciseType: ExerciseType.BICYCLE,
-      advancedTracking: true, // 🆕 가속계, 자이로스코프 활성화
+      useAccelerometer: true, // 진동, 경사 분석
+      useGyroscope: true, // 코너링 분석
+      useMagnetometer: true, // 방향 추적
+      useLight: true, // 조도 측정
+      useNoise: false, // 소음 측정 (권한 필요)
       interval: 1000,
-      fastestInterval: 1000,
       desiredAccuracy: "high",
-    })
-
-    // 위치 이벤트 리스너
-    RNRidableGpsTracker.addListener("location", (data: LocationData) => {
-      console.log("GPS:", data.latitude, data.longitude)
-
-      // 🆕 이동 상태
-      if (data.isMoving) {
-        console.log("🟢 이동 중:", data.speed * 3.6, "km/h")
-      } else {
-        console.log("🟠 자동 멈춤 (속도 < 0.5 m/s)")
-      }
-
-      // 🆕 Grade 정보
-      if (data.grade !== undefined) {
-        console.log("경사도:", data.grade.toFixed(1), "%")
-        console.log("카테고리:", data.gradeCategory)
-        console.log("설명:", GradeAnalyzer.getGradeDescription(data.grade))
-      }
-
-      // 🆕 세션 통계
-      const summary = SessionAnalyzer.generateSummary(data)
-      if (summary) {
-        console.log("거리:", summary.distance)
-        console.log("경과 시간:", summary.duration)
-        console.log("이동 시간:", summary.movingTime)
-        console.log("평균 속도:", summary.avgSpeed)
-        console.log("이동 평균:", summary.movingAvgSpeed)
-        console.log("획득 고도:", summary.elevationGain)
-        console.log("효율성:", summary.efficiency)
-      }
-
-      // 🆕 운동 분석 데이터 활용
-      if (data.motionAnalysis) {
-        const analysis = MotionAnalyzer.analyzeCycling(data)
-        console.log("도로 상태:", analysis?.roadCondition)
-        console.log("커브 강도:", analysis?.corneringLevel)
-        console.log("경사도:", analysis?.climbingIntensity)
-
-        // 노면 품질 점수
-        const roadScore = SensorDataProcessor.calculateRoadQualityScore(data)
-        console.log("노면 점수:", roadScore)
-
-        // 코너링 위험도
-        const cornerRisk = SensorDataProcessor.calculateCorneringRisk(data)
-        console.log("코너 위험도:", cornerRisk)
-      }
-
-      // 🆕 칼로리 계산
-      const calories = SensorDataProcessor.estimateCaloriesBurn(data, 70) // 70kg 기준
-      if (calories) {
-        console.log("소모 칼로리:", calories.toFixed(0), "kcal")
-      }
     })
 
     await RNRidableGpsTracker.start()
   },
 }
 
-// index.ts와의 호환성을 위한 type alias
+// 호환성을 위한 type alias
 export type LocationConfig = GpsTrackerConfig
 export type LocationStatus = TrackerStatus

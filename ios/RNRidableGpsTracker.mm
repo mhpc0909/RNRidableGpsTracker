@@ -1,6 +1,8 @@
 #import "RNRidableGpsTracker.h"
 #import <CoreLocation/CoreLocation.h>
 #import <CoreMotion/CoreMotion.h>
+#import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <React/RCTLog.h>
 
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
@@ -30,7 +32,7 @@
 @property (nonatomic, assign) double processNoise;
 @property (nonatomic, assign) BOOL useKalmanFilter;
 
-// 🆕 Kalman 필터 (고도)
+// Kalman 필터 (고도)
 @property (nonatomic, assign) double kalmanAltitude;
 @property (nonatomic, assign) double altitudeVariance;
 @property (nonatomic, assign) BOOL isAltitudeKalmanInitialized;
@@ -38,35 +40,55 @@
 
 // 설정
 @property (nonatomic, strong) NSString *exerciseType;
-@property (nonatomic, assign) BOOL advancedTracking;
+@property (nonatomic, assign) BOOL useAccelerometer;
+@property (nonatomic, assign) BOOL useGyroscope;
+@property (nonatomic, assign) BOOL useMagnetometer;
+@property (nonatomic, assign) BOOL useLight;
+@property (nonatomic, assign) BOOL useNoise;
 
-// 가속계 데이터
+// 가속계 데이터 (Native 분석용)
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *accelerometerBuffer;
 @property (nonatomic, assign) double lastAccelX;
 @property (nonatomic, assign) double lastAccelY;
 @property (nonatomic, assign) double lastAccelZ;
 @property (nonatomic, assign) NSTimeInterval lastAccelTimestamp;
 
-// 자이로스코프 데이터
+// 자이로스코프 데이터 (Native 분석용)
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *gyroscopeBuffer;
 @property (nonatomic, assign) double lastGyroX;
 @property (nonatomic, assign) double lastGyroY;
 @property (nonatomic, assign) double lastGyroZ;
 @property (nonatomic, assign) NSTimeInterval lastGyroTimestamp;
 
+// 자기장 센서 데이터 (Native 분석용)
+@property (nonatomic, assign) double lastMagX;
+@property (nonatomic, assign) double lastMagY;
+@property (nonatomic, assign) double lastMagZ;
+@property (nonatomic, assign) double lastMagHeading;
+@property (nonatomic, assign) NSTimeInterval lastMagTimestamp;
+
+// 광센서 데이터
+@property (nonatomic, assign) double currentLux;
+@property (nonatomic, assign) NSTimeInterval lastLuxTimestamp;
+
+// 소음 데이터
+@property (nonatomic, assign) double currentDecibel;
+@property (nonatomic, assign) NSTimeInterval lastDecibelTimestamp;
+@property (nonatomic, strong) NSTimer *noiseTimer;
+
 @property (nonatomic, assign) NSInteger maxBufferSize;
 
-// 🆕 통계 데이터
-@property (nonatomic, assign) double sessionDistance;          // 이동 거리 (m)
-@property (nonatomic, assign) double sessionElevationGain;     // 획득 고도 (m)
-@property (nonatomic, assign) double sessionElevationLoss;     // 상실 고도 (m)
-@property (nonatomic, assign) double sessionMaxSpeed;          // 최고 속도 (m/s)
-@property (nonatomic, assign) double sessionMovingTime;        // 이동 시간 (초)
-@property (nonatomic, assign) double sessionElapsedTime;       // 총 경과 시간 (초)
-@property (nonatomic, assign) NSTimeInterval sessionStartTime; // 세션 시작 시간
-@property (nonatomic, strong) CLLocation *previousLocation;    // 이전 위치
-@property (nonatomic, assign) double previousAltitude;         // 이전 고도
-@property (nonatomic, assign) NSTimeInterval lastUpdateTime;   // 마지막 업데이트 시간
+// 통계 데이터
+@property (nonatomic, assign) double sessionDistance;
+@property (nonatomic, assign) double sessionElevationGain;
+@property (nonatomic, assign) double sessionElevationLoss;
+@property (nonatomic, assign) double sessionMaxSpeed;
+@property (nonatomic, assign) double sessionMovingTime;
+@property (nonatomic, assign) double sessionElapsedTime;
+@property (nonatomic, assign) NSTimeInterval sessionStartTime;
+@property (nonatomic, strong) CLLocation *previousLocation;
+@property (nonatomic, assign) double previousAltitude;
+@property (nonatomic, assign) NSTimeInterval lastUpdateTime;
 
 @end
 
@@ -92,16 +114,19 @@ RCT_EXPORT_MODULE()
         _isAltitudeKalmanInitialized = NO;
         _useKalmanFilter = NO;
         _exerciseType = @"bicycle";
-        _advancedTracking = NO;
+        _useAccelerometer = YES;
+        _useGyroscope = YES;
+        _useMagnetometer = NO;
+        _useLight = YES;
+        _useNoise = NO;
         _variance = 0.0;
         _processNoise = 0.0;
         _altitudeVariance = 0.0;
-        _altitudeProcessNoise = 0.5;  // 고도 Kalman 프로세스 노이즈
+        _altitudeProcessNoise = 0.5;
         _maxBufferSize = 10;
         _accelerometerBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
         _gyroscopeBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
         
-        // 🆕 통계 초기화
         _sessionDistance = 0.0;
         _sessionElevationGain = 0.0;
         _sessionElevationLoss = 0.0;
@@ -112,6 +137,13 @@ RCT_EXPORT_MODULE()
         _previousLocation = nil;
         _previousAltitude = 0.0;
         _lastUpdateTime = 0;
+        
+        // 광센서와 소음 초기화
+        _currentLux = 0.0;
+        _lastLuxTimestamp = 0;
+        _currentDecibel = 0.0;
+        _lastDecibelTimestamp = 0;
+        _noiseTimer = nil;
     }
     return self;
 }
@@ -140,8 +172,9 @@ RCT_EXPORT_MODULE()
 - (void)setupMotionManager
 {
     self.motionManager = [[CMMotionManager alloc] init];
-    self.motionManager.accelerometerUpdateInterval = 0.02;
-    self.motionManager.gyroUpdateInterval = 0.02;
+    self.motionManager.accelerometerUpdateInterval = 0.02;  // 50 Hz
+    self.motionManager.gyroUpdateInterval = 0.02;           // 50 Hz
+    self.motionManager.magnetometerUpdateInterval = 1.0;    // 1 Hz
     
     if (self.motionManager.isAccelerometerAvailable) {
         RCTLogInfo(@"[RNRidableGpsTracker] ✅ Accelerometer available");
@@ -149,6 +182,10 @@ RCT_EXPORT_MODULE()
     
     if (self.motionManager.isGyroAvailable) {
         RCTLogInfo(@"[RNRidableGpsTracker] ✅ Gyroscope available");
+    }
+    
+    if (self.motionManager.isMagnetometerAvailable) {
+        RCTLogInfo(@"[RNRidableGpsTracker] ✅ Magnetometer available");
     }
 }
 
@@ -215,12 +252,12 @@ RCT_EXPORT_MODULE()
     RCTLogInfo(@"[KalmanFilter] Position reset");
 }
 
-#pragma mark - 🆕 Kalman Filter (고도)
+#pragma mark - Kalman Filter (고도)
 
 - (void)initAltitudeKalmanFilter:(double)altitude
 {
     self.kalmanAltitude = altitude;
-    self.altitudeVariance = 25.0;  // 초기 분산 (5m 정확도 가정)
+    self.altitudeVariance = 25.0;
     self.isAltitudeKalmanInitialized = YES;
     
     RCTLogInfo(@"[KalmanFilter] Altitude initialized: %.2fm", altitude);
@@ -233,19 +270,14 @@ RCT_EXPORT_MODULE()
         return measuredAltitude;
     }
     
-    // 측정 노이즈
     double measurementNoise = accuracy * accuracy;
     if (measurementNoise <= 0) {
-        measurementNoise = 25.0;  // 기본값
+        measurementNoise = 25.0;
     }
     
-    // 예측 단계
     double predictedVariance = self.altitudeVariance + self.altitudeProcessNoise;
-    
-    // 칼만 게인
     double kalmanGain = predictedVariance / (predictedVariance + measurementNoise);
     
-    // 업데이트 단계
     self.kalmanAltitude = self.kalmanAltitude + kalmanGain * (measuredAltitude - self.kalmanAltitude);
     self.altitudeVariance = (1.0 - kalmanGain) * predictedVariance;
     
@@ -259,7 +291,7 @@ RCT_EXPORT_MODULE()
     RCTLogInfo(@"[KalmanFilter] Altitude reset");
 }
 
-#pragma mark - 🆕 통계 계산
+#pragma mark - 통계 계산
 
 - (void)resetSessionStats
 {
@@ -288,30 +320,23 @@ RCT_EXPORT_MODULE()
         return;
     }
     
-    // 1. 거리 계산 (✅ 수정: distanceFromLocation: 사용)
     CLLocationDistance distance = [self.previousLocation distanceFromLocation:location];
     
-    // 최소 거리 필터 (노이즈 제거)
-    if (distance > 0.5 && distance < 100) {  // 0.5m ~ 100m 사이만 유효
+    if (distance > 0.5 && distance < 100) {
         self.sessionDistance += distance;
     }
     
-    // 2. 시간 계산
     NSTimeInterval timeDelta = currentTime - self.lastUpdateTime;
-    if (timeDelta > 0 && timeDelta < 10) {  // 0초 ~ 10초 사이만 유효 (비정상 값 필터)
-        // 총 경과 시간
+    if (timeDelta > 0 && timeDelta < 10) {
         self.sessionElapsedTime += timeDelta;
         
-        // 이동 시간 (속도가 0.5 m/s 이상일 때만)
         if (location.speed >= 0.5) {
             self.sessionMovingTime += timeDelta;
         }
     }
     
-    // 3. 고도 변화 계산
     double elevationChange = currentAltitude - self.previousAltitude;
     
-    // 최소 고도 변화 필터 (0.5m 이상만)
     if (fabs(elevationChange) > 0.5) {
         if (elevationChange > 0) {
             self.sessionElevationGain += elevationChange;
@@ -320,12 +345,10 @@ RCT_EXPORT_MODULE()
         }
     }
     
-    // 4. 최고 속도 업데이트
     if (location.speed >= 0 && location.speed > self.sessionMaxSpeed) {
         self.sessionMaxSpeed = location.speed;
     }
     
-    // 이전 위치/고도/시간 업데이트
     self.previousLocation = location;
     self.previousAltitude = currentAltitude;
     self.lastUpdateTime = currentTime;
@@ -337,21 +360,15 @@ RCT_EXPORT_MODULE()
         return 0.0;
     }
     
-    // 수평 거리 (✅ 수정: distanceFromLocation: 사용)
     CLLocationDistance horizontalDistance = [self.previousLocation distanceFromLocation:location];
     
-    // 최소 거리 필터
     if (horizontalDistance < 5.0) {
         return 0.0;
     }
     
-    // 고도 변화
     double elevationChange = currentAltitude - self.previousAltitude;
-    
-    // Grade 계산 (%)
     double grade = (elevationChange / horizontalDistance) * 100.0;
     
-    // 범위 제한 (-30% ~ 30%)
     return fmax(-30.0, fmin(30.0, grade));
 }
 
@@ -399,10 +416,35 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
         self.locationManager.pausesLocationUpdatesAutomatically = [config[@"pausesLocationUpdatesAutomatically"] boolValue];
     }
     
-    if (config[@"advancedTracking"]) {
-        self.advancedTracking = [config[@"advancedTracking"] boolValue];
+    // 센서 개별 제어
+    if (config[@"useAccelerometer"]) {
+        self.useAccelerometer = [config[@"useAccelerometer"] boolValue];
     } else {
-        self.advancedTracking = NO;
+        self.useAccelerometer = YES;
+    }
+    
+    if (config[@"useGyroscope"]) {
+        self.useGyroscope = [config[@"useGyroscope"] boolValue];
+    } else {
+        self.useGyroscope = YES;
+    }
+    
+    if (config[@"useMagnetometer"]) {
+        self.useMagnetometer = [config[@"useMagnetometer"] boolValue];
+    } else {
+        self.useMagnetometer = NO;
+    }
+    
+    if (config[@"useLight"]) {
+        self.useLight = [config[@"useLight"] boolValue];
+    } else {
+        self.useLight = YES;
+    }
+    
+    if (config[@"useNoise"]) {
+        self.useNoise = [config[@"useNoise"] boolValue];
+    } else {
+        self.useNoise = NO;
     }
     
     if (config[@"exerciseType"]) {
@@ -453,19 +495,28 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
         return;
     }
     
-    RCTLogInfo(@"[RNRidableGpsTracker] 🚀 Starting: %@ (Advanced: %d)", self.exerciseType, self.advancedTracking);
+    RCTLogInfo(@"[RNRidableGpsTracker] 🚀 Starting: %@", self.exerciseType);
     
     [self resetKalmanFilter];
     [self resetAltitudeKalmanFilter];
-    [self resetSessionStats];  // 🆕 통계 리셋
+    [self resetSessionStats];
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         self.isTracking = YES;
         [self.locationManager startUpdatingLocation];
         [self startAltimeterUpdates];
         
-        if (self.advancedTracking) {
-            [self startAdvancedSensors];
+        // 센서별 시작
+        [self startAdvancedSensors];
+        
+        // 광센서 시작 (useLight)
+        if (self.useLight) {
+            [self startLightSensor];
+        }
+        
+        // 소음 측정 시작 (useNoise)
+        if (self.useNoise) {
+            [self startNoiseMeasurement];
         }
         
         [self startRepeatLocationUpdates];
@@ -482,6 +533,8 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
     [self stopAltimeterUpdates];
     [self stopAdvancedSensors];
     [self stopRepeatLocationUpdates];
+    [self stopLightSensor];
+    [self stopNoiseMeasurement];
     [self resetKalmanFilter];
     [self resetAltitudeKalmanFilter];
     
@@ -496,7 +549,6 @@ RCT_EXPORT_METHOD(getCurrentLocation:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
     if (self.lastLocation) {
-        // ✅ 수정: withNewFlag:currentAltitude: 파라미터 추가
         double currentAltitude;
         if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
             currentAltitude = self.enhancedAltitude;
@@ -551,8 +603,8 @@ RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
         @"isBarometerAvailable": @([CMAltimeter isRelativeAltitudeAvailable]),
         @"isAccelerometerAvailable": @(self.motionManager.isAccelerometerAvailable),
         @"isGyroscopeAvailable": @(self.motionManager.isGyroAvailable),
+        @"isMagnetometerAvailable": @(self.motionManager.isMagnetometerAvailable),
         @"exerciseType": self.exerciseType,
-        @"advancedTracking": @(self.advancedTracking),
         @"useKalmanFilter": @(self.useKalmanFilter)
     };
     
@@ -612,10 +664,8 @@ RCT_EXPORT_METHOD(openLocationSettings)
                 double relativeAltitude = [altitudeData.relativeAltitude doubleValue];
                 double barometerAltitude = self.startGpsAltitude + relativeAltitude;
                 
-                // enhancedAltitude = GPS 30% + 기압계 70%
                 double rawEnhancedAltitude = (gpsAltitude * 0.3) + (barometerAltitude * 0.7);
                 
-                // 🆕 Kalman 필터 적용
                 self.enhancedAltitude = [self applyAltitudeKalmanFilter:rawEnhancedAltitude 
                                                                accuracy:self.lastLocation.verticalAccuracy];
             }
@@ -638,9 +688,8 @@ RCT_EXPORT_METHOD(openLocationSettings)
 
 - (void)startAdvancedSensors
 {
-    if (!self.advancedTracking) return;
-    
-    if (self.motionManager.isAccelerometerAvailable) {
+    // 가속계 시작 (useAccelerometer)
+    if (self.useAccelerometer && self.motionManager.isAccelerometerAvailable) {
         [self.accelerometerBuffer removeAllObjects];
         
         [self.motionManager startAccelerometerUpdatesToQueue:[NSOperationQueue mainQueue]
@@ -671,10 +720,11 @@ RCT_EXPORT_METHOD(openLocationSettings)
             }
         }];
         
-        RCTLogInfo(@"[RNRidableGpsTracker] 📊 Accelerometer started");
+        RCTLogInfo(@"[RNRidableGpsTracker] 📊 Accelerometer started (50 Hz)");
     }
     
-    if (self.motionManager.isGyroAvailable) {
+    // 자이로스코프 시작 (useGyroscope)
+    if (self.useGyroscope && self.motionManager.isGyroAvailable) {
         [self.gyroscopeBuffer removeAllObjects];
         
         [self.motionManager startGyroUpdatesToQueue:[NSOperationQueue mainQueue]
@@ -705,7 +755,33 @@ RCT_EXPORT_METHOD(openLocationSettings)
             }
         }];
         
-        RCTLogInfo(@"[RNRidableGpsTracker] 📊 Gyroscope started");
+        RCTLogInfo(@"[RNRidableGpsTracker] 📊 Gyroscope started (50 Hz)");
+    }
+    
+    // 자기장 센서 시작 (useMagnetometer)
+    if (self.useMagnetometer && self.motionManager.isMagnetometerAvailable) {
+        [self.motionManager startMagnetometerUpdatesToQueue:[NSOperationQueue mainQueue]
+                                                withHandler:^(CMMagnetometerData *data, NSError *error) {
+            if (error) {
+                RCTLogError(@"[Magnetometer] Error: %@", error.localizedDescription);
+                return;
+            }
+            
+            if (data) {
+                self.lastMagX = data.magneticField.x;
+                self.lastMagY = data.magneticField.y;
+                self.lastMagZ = data.magneticField.z;
+                self.lastMagTimestamp = [[NSDate date] timeIntervalSince1970];
+                
+                double heading = atan2(self.lastMagY, self.lastMagX) * (180.0 / M_PI);
+                if (heading < 0) {
+                    heading += 360.0;
+                }
+                self.lastMagHeading = heading;
+            }
+        }];
+        
+        RCTLogInfo(@"[RNRidableGpsTracker] 🧭 Magnetometer started (1 Hz)");
     }
 }
 
@@ -722,29 +798,58 @@ RCT_EXPORT_METHOD(openLocationSettings)
         [self.gyroscopeBuffer removeAllObjects];
         RCTLogInfo(@"[RNRidableGpsTracker] Gyroscope stopped");
     }
+    
+    if (self.motionManager.isMagnetometerActive) {
+        [self.motionManager stopMagnetometerUpdates];
+        self.lastMagTimestamp = 0;
+        RCTLogInfo(@"[RNRidableGpsTracker] 🧭 Magnetometer stopped");
+    }
 }
 
 #pragma mark - Motion Analysis
 
 - (NSDictionary *)generateMotionAnalysis
 {
-    if (!self.advancedTracking || self.accelerometerBuffer.count == 0) {
+    // 가속계나 자이로스코프 중 하나라도 사용하지 않으면 nil
+    if (!self.useAccelerometer && !self.useGyroscope) {
         return nil;
     }
     
-    double vibrationIntensity = [self calculateVibrationIntensity];
-    NSString *roadSurfaceQuality;
+    // 가속계 사용 시 진동 데이터 계산
+    double vibrationLevel = 0.0;
+    double vibrationIntensity = 0.0;
+    NSString *roadSurfaceQuality = @"smooth";
+    double inclineAngle = 0.0;
+    BOOL isClimbing = NO;
+    BOOL isDescending = NO;
+    double verticalAcceleration = 0.0;
     
-    if (vibrationIntensity < 0.2) {
-        roadSurfaceQuality = @"smooth";
-    } else if (vibrationIntensity < 0.5) {
-        roadSurfaceQuality = @"rough";
-    } else {
-        roadSurfaceQuality = @"very_rough";
+    if (self.useAccelerometer && self.accelerometerBuffer.count > 0) {
+        // 원본 진동 수치 계산
+        vibrationLevel = [self calculateVibrationLevel];
+        
+        // 정규화된 진동 강도
+        vibrationIntensity = [self calculateVibrationIntensity];
+        
+        // 노면 품질 분류
+        if (vibrationIntensity < 0.2) {
+            roadSurfaceQuality = @"smooth";
+        } else if (vibrationIntensity < 0.5) {
+            roadSurfaceQuality = @"rough";
+        } else {
+            roadSurfaceQuality = @"very_rough";
+        }
+        
+        NSDictionary *inclineData = [self calculateIncline];
+        inclineAngle = [inclineData[@"angle"] doubleValue];
+        isClimbing = [inclineData[@"isClimbing"] boolValue];
+        isDescending = [inclineData[@"isDescending"] boolValue];
+        verticalAcceleration = fabs(self.lastAccelZ) - 9.81;
     }
     
+    // 자이로스코프 사용 시 코너링 데이터 계산
     double corneringIntensity = 0.0;
-    if (self.gyroscopeBuffer.count > 0) {
+    if (self.useGyroscope && self.gyroscopeBuffer.count > 0) {
         double totalRotZ = 0.0;
         for (NSDictionary *reading in self.gyroscopeBuffer) {
             totalRotZ += fabs([reading[@"z"] doubleValue]);
@@ -753,18 +858,37 @@ RCT_EXPORT_METHOD(openLocationSettings)
         corneringIntensity = MIN(avgRotationZ / 3.0, 1.0);
     }
     
-    NSDictionary *inclineData = [self calculateIncline];
-    double verticalAcceleration = fabs(self.lastAccelZ) - 9.81;
-    
     return @{
         @"roadSurfaceQuality": roadSurfaceQuality,
+        @"vibrationLevel": @(vibrationLevel),
         @"vibrationIntensity": @(vibrationIntensity),
         @"corneringIntensity": @(corneringIntensity),
-        @"inclineAngle": inclineData[@"angle"],
-        @"isClimbing": inclineData[@"isClimbing"],
-        @"isDescending": inclineData[@"isDescending"],
+        @"inclineAngle": @(inclineAngle),
+        @"isClimbing": @(isClimbing),
+        @"isDescending": @(isDescending),
         @"verticalAcceleration": @(verticalAcceleration)
     };
+}
+
+- (double)calculateVibrationLevel
+{
+    if (self.accelerometerBuffer.count < 2) return 0.0;
+    
+    double totalVariation = 0.0;
+    
+    for (NSInteger i = 1; i < self.accelerometerBuffer.count; i++) {
+        NSDictionary *prev = self.accelerometerBuffer[i - 1];
+        NSDictionary *curr = self.accelerometerBuffer[i];
+        
+        double dx = [curr[@"x"] doubleValue] - [prev[@"x"] doubleValue];
+        double dy = [curr[@"y"] doubleValue] - [prev[@"y"] doubleValue];
+        double dz = [curr[@"z"] doubleValue] - [prev[@"z"] doubleValue];
+        
+        totalVariation += sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    
+    // 원본 평균 변화량 반환 (m/s²)
+    return totalVariation / (self.accelerometerBuffer.count - 1);
 }
 
 - (double)calculateVibrationIntensity
@@ -829,36 +953,29 @@ RCT_EXPORT_METHOD(openLocationSettings)
     CLLocation *location = locations.lastObject;
     if (!location) return;
     
-    // 위치 Kalman 필터 적용
     CLLocation *processedLocation = location;
     if (self.useKalmanFilter) {
         processedLocation = [self applyKalmanFilter:location];
     }
     
-    // 첫 GPS 고도 설정
     if (!self.hasStartGpsAltitude && processedLocation.verticalAccuracy >= 0) {
         self.startGpsAltitude = processedLocation.altitude;
         self.enhancedAltitude = self.startGpsAltitude;
         self.hasStartGpsAltitude = YES;
         
-        // 고도 Kalman 필터 초기화
         [self initAltitudeKalmanFilter:self.startGpsAltitude];
         
         RCTLogInfo(@"[RNRidableGpsTracker] 🎯 Start altitude: %.1fm", self.startGpsAltitude);
     }
     
-    // 🆕 사용할 고도 결정
     double currentAltitude;
     if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
-        // 기압계 있음 → enhancedAltitude 사용 (이미 Kalman 적용됨)
         currentAltitude = self.enhancedAltitude;
     } else {
-        // 기압계 없음 → GPS altitude에 Kalman 적용
         currentAltitude = [self applyAltitudeKalmanFilter:processedLocation.altitude 
                                                  accuracy:processedLocation.verticalAccuracy];
     }
     
-    // 🆕 통계 업데이트
     [self updateSessionStats:processedLocation currentAltitude:currentAltitude];
     
     self.lastLocation = processedLocation;
@@ -953,7 +1070,6 @@ RCT_EXPORT_METHOD(openLocationSettings)
     if (self.lastLocation && self.isTracking && self.hasListeners) {
         BOOL isNew = self.isNewLocationAvailable;
         
-        // 현재 고도 결정
         double currentAltitude;
         if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
             currentAltitude = self.enhancedAltitude;
@@ -988,7 +1104,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
         @"isNewLocation": @(isNew),
         @"isKalmanFiltered": @(self.useKalmanFilter && self.isKalmanInitialized),
         
-        // 🆕 통계 데이터
+        // 통계 데이터
         @"sessionDistance": @(self.sessionDistance),
         @"sessionElevationGain": @(self.sessionElevationGain),
         @"sessionElevationLoss": @(self.sessionElevationLoss),
@@ -1009,54 +1125,215 @@ RCT_EXPORT_METHOD(openLocationSettings)
         dict[@"relativeAltitude"] = @(relativeAltitude);
         dict[@"pressure"] = @(pressure);
         
-        // 🆕 Grade 계산 (enhancedAltitude 기반)
         double grade = [self calculateGrade:location currentAltitude:currentAltitude];
         dict[@"grade"] = @(grade);
         dict[@"gradeCategory"] = [self getGradeCategory:grade];
     } else {
-        // 기압계 없을 때도 altitude로 Grade 계산
         double grade = [self calculateGrade:location currentAltitude:currentAltitude];
         dict[@"grade"] = @(grade);
         dict[@"gradeCategory"] = [self getGradeCategory:grade];
     }
     
-    // 가속계 데이터
-    if (self.advancedTracking && self.lastAccelTimestamp > 0) {
-        double magnitude = sqrt(self.lastAccelX * self.lastAccelX + 
-                               self.lastAccelY * self.lastAccelY + 
-                               self.lastAccelZ * self.lastAccelZ);
-        
-        dict[@"accelerometer"] = @{
-            @"x": @(self.lastAccelX),
-            @"y": @(self.lastAccelY),
-            @"z": @(self.lastAccelZ),
-            @"magnitude": @(magnitude)
-        };
-    }
-    
-    // 자이로스코프 데이터
-    if (self.advancedTracking && self.lastGyroTimestamp > 0) {
-        double rotationRate = sqrt(self.lastGyroX * self.lastGyroX + 
-                                   self.lastGyroY * self.lastGyroY + 
-                                   self.lastGyroZ * self.lastGyroZ);
-        
-        dict[@"gyroscope"] = @{
-            @"x": @(self.lastGyroX),
-            @"y": @(self.lastGyroY),
-            @"z": @(self.lastGyroZ),
-            @"rotationRate": @(rotationRate)
-        };
-    }
-    
-    // 운동 분석 데이터
-    if (self.advancedTracking) {
+    // 모션 분석 결과만 전송 (Raw 센서 데이터 제거됨)
+    if (self.useAccelerometer || self.useGyroscope) {
         NSDictionary *motionAnalysis = [self generateMotionAnalysis];
         if (motionAnalysis) {
             dict[@"motionAnalysis"] = motionAnalysis;
         }
     }
     
+    // 광센서 데이터
+    if (self.useLight && self.lastLuxTimestamp > 0) {
+        dict[@"light"] = @{
+            @"lux": @(self.currentLux),
+            @"condition": [self getLightCondition:self.currentLux],
+            @"isLowLight": @(self.currentLux < 50)
+        };
+    }
+    
+    // 소음 데이터
+    if (self.useNoise && self.lastDecibelTimestamp > 0 && self.currentDecibel > 0) {
+        dict[@"noise"] = @{
+            @"decibel": @(self.currentDecibel),
+            @"noiseLevel": [self getNoiseLevel:self.currentDecibel]
+        };
+    }
+    
+    // 자기장 데이터
+    if (self.useMagnetometer && self.lastMagTimestamp > 0) {
+        double magneticFieldStrength = sqrt(self.lastMagX * self.lastMagX + 
+                                           self.lastMagY * self.lastMagY + 
+                                           self.lastMagZ * self.lastMagZ);
+        
+        dict[@"magnetometer"] = @{
+            @"heading": @(self.lastMagHeading),
+            @"magneticFieldStrength": @(magneticFieldStrength),
+            @"x": @(self.lastMagX),
+            @"y": @(self.lastMagY),
+            @"z": @(self.lastMagZ)
+        };
+    }
+    
     return dict;
+}
+
+#pragma mark - 광센서
+
+- (void)startLightSensor
+{
+    // iOS에서는 UIScreen brightness를 사용 (간접 측정)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(screenBrightnessDidChange:)
+                                                     name:UIScreenBrightnessDidChangeNotification
+                                                   object:nil];
+        
+        // 초기값 설정
+        [self updateLightLevel];
+        RCTLogInfo(@"💡 Light sensor started");
+    });
+}
+
+- (void)stopLightSensor
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:UIScreenBrightnessDidChangeNotification
+                                                  object:nil];
+    self.currentLux = 0.0;
+    self.lastLuxTimestamp = 0;
+    RCTLogInfo(@"💡 Light sensor stopped");
+}
+
+- (void)screenBrightnessDidChange:(NSNotification *)notification
+{
+    [self updateLightLevel];
+}
+
+- (void)updateLightLevel
+{
+    // iOS는 직접 광센서 접근 불가, UIScreen brightness 기반 추정
+    CGFloat brightness = [UIScreen mainScreen].brightness;
+    
+    // brightness (0.0~1.0)를 lux로 변환 (추정)
+    // 0.0 = 어두움 (~10 lux)
+    // 0.5 = 실내 (~200 lux)
+    // 1.0 = 밝음 (~10000 lux)
+    
+    if (brightness < 0.2) {
+        self.currentLux = 10.0 + (brightness / 0.2) * 40.0;  // 10~50 lux
+    } else if (brightness < 0.5) {
+        self.currentLux = 50.0 + ((brightness - 0.2) / 0.3) * 150.0;  // 50~200 lux
+    } else if (brightness < 0.8) {
+        self.currentLux = 200.0 + ((brightness - 0.5) / 0.3) * 800.0;  // 200~1000 lux
+    } else {
+        self.currentLux = 1000.0 + ((brightness - 0.8) / 0.2) * 9000.0;  // 1000~10000 lux
+    }
+    
+    self.lastLuxTimestamp = [[NSDate date] timeIntervalSince1970];
+}
+
+- (NSString *)getLightCondition:(double)lux
+{
+    if (lux < 10) return @"dark";
+    if (lux < 50) return @"dim";
+    if (lux < 200) return @"indoor";
+    if (lux < 1000) return @"overcast";
+    if (lux < 10000) return @"daylight";
+    return @"bright_sunlight";
+}
+
+#pragma mark - 소음 측정
+
+- (void)startNoiseMeasurement
+{
+    if (self.noiseTimer) {
+        [self.noiseTimer invalidate];
+    }
+    
+    self.noiseTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                       target:self
+                                                     selector:@selector(measureNoiseLevel)
+                                                     userInfo:nil
+                                                      repeats:YES];
+    
+    RCTLogInfo(@"🎤 Noise measurement started (1 Hz)");
+}
+
+- (void)stopNoiseMeasurement
+{
+    if (self.noiseTimer) {
+        [self.noiseTimer invalidate];
+        self.noiseTimer = nil;
+    }
+    
+    self.currentDecibel = 0.0;
+    self.lastDecibelTimestamp = 0;
+    RCTLogInfo(@"🎤 Noise measurement stopped");
+}
+
+- (void)measureNoiseLevel
+{
+    // AVAudioRecorder를 사용한 소음 측정
+    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+    
+    [audioSession setCategory:AVAudioSessionCategoryRecord error:&error];
+    if (error) {
+        RCTLogError(@"Audio session error: %@", error);
+        return;
+    }
+    
+    [audioSession setActive:YES error:&error];
+    if (error) {
+        RCTLogError(@"Audio session activate error: %@", error);
+        return;
+    }
+    
+    // 임시 녹음 설정
+    NSDictionary *settings = @{
+        AVFormatIDKey: @(kAudioFormatAppleLossless),
+        AVSampleRateKey: @44100.0,
+        AVNumberOfChannelsKey: @1,
+        AVEncoderAudioQualityKey: @(AVAudioQualityMin)
+    };
+    
+    NSURL *url = [NSURL fileURLWithPath:@"/dev/null"];
+    AVAudioRecorder *recorder = [[AVAudioRecorder alloc] initWithURL:url settings:settings error:&error];
+    
+    if (error || !recorder) {
+        RCTLogError(@"Audio recorder error: %@", error);
+        return;
+    }
+    
+    [recorder prepareToRecord];
+    recorder.meteringEnabled = YES;
+    [recorder record];
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [recorder updateMeters];
+        
+        // averagePowerForChannel: -160 ~ 0 dB 범위
+        float averagePower = [recorder averagePowerForChannel:0];
+        
+        // -160 ~ 0 범위를 0 ~ 120 dB로 변환
+        float decibel = MAX(0, MIN(120, averagePower + 120));
+        
+        self.currentDecibel = decibel;
+        self.lastDecibelTimestamp = [[NSDate date] timeIntervalSince1970];
+        
+        [recorder stop];
+        [audioSession setActive:NO error:nil];
+    });
+}
+
+- (NSString *)getNoiseLevel:(double)decibel
+{
+    if (decibel < 30) return @"very_quiet";
+    if (decibel < 50) return @"quiet";
+    if (decibel < 60) return @"moderate";
+    if (decibel < 70) return @"noisy";
+    if (decibel < 85) return @"very_noisy";
+    return @"dangerously_loud";
 }
 
 @end

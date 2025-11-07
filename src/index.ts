@@ -1,11 +1,11 @@
 import { NativeEventEmitter, NativeModules, Platform } from "react-native"
-import type { GpsTrackerConfig, LocationData, TrackerStatus, LocationEventCallback, ErrorEventCallback, AuthorizationChangedCallback, ExerciseType, RoadSurfaceQuality, GradeCategory, AccelerometerData, GyroscopeData, MotionAnalysis, SessionStats, RNRidableGpsTrackerModule } from "./types"
+import type { GpsTrackerConfig, LocationData, TrackerStatus, LocationEventCallback, ErrorEventCallback, AuthorizationChangedCallback, ExerciseType, RoadSurfaceQuality, GradeCategory, MotionAnalysis, SessionStats, MagnetometerData, LightData, NoiseData, RNRidableGpsTrackerModule } from "./types"
 
 // 🆕 헬퍼 클래스 export
-export { MotionAnalyzer, SensorDataProcessor, SessionAnalyzer, GradeAnalyzer } from "./types"
+export { MotionAnalyzer, SensorDataProcessor, SessionAnalyzer, GradeAnalyzer, MagnetometerAnalyzer, LightAnalyzer, NoiseAnalyzer } from "./types"
 
 // 타입 export
-export type { GpsTrackerConfig, LocationData, TrackerStatus, LocationEventCallback, ErrorEventCallback, AuthorizationChangedCallback, ExerciseType, RoadSurfaceQuality, GradeCategory, AccelerometerData, GyroscopeData, MotionAnalysis, SessionStats, RNRidableGpsTrackerModule }
+export type { GpsTrackerConfig, LocationData, TrackerStatus, LocationEventCallback, ErrorEventCallback, AuthorizationChangedCallback, ExerciseType, RoadSurfaceQuality, GradeCategory, MotionAnalysis, SessionStats, MagnetometerData, LightData, NoiseData, RNRidableGpsTrackerModule }
 
 // enum export
 export { ExerciseType } from "./types"
@@ -220,6 +220,24 @@ export const GpsTrackerUtils = {
       if (absGrade < 12) return "⏬"
       return "🔻"
     }
+  },
+
+  /**
+   * 방위각을 방향 문자열로 변환
+   */
+  getDirectionFromHeading(heading: number): string {
+    const directions = ["북", "북동", "동", "남동", "남", "남서", "서", "북서"]
+    const index = Math.round(heading / 45) % 8
+    return directions[index]
+  },
+
+  /**
+   * 방위각 이모지 가져오기
+   */
+  getDirectionEmoji(heading: number): string {
+    const emojis = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅️", "↖️"]
+    const index = Math.round(heading / 45) % 8
+    return emojis[index]
   },
 }
 
