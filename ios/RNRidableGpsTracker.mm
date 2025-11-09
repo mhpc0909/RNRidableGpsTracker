@@ -982,22 +982,27 @@ RCT_EXPORT_METHOD(openLocationSettings)
     self.lastLocationTimestamp = processedLocation.timestamp;
     self.isNewLocationAvailable = YES;
     
-    if (self.isTracking && self.hasListeners) {
-        [self sendEventWithName:@"location" body:[self convertLocationToDict:processedLocation 
-                                                                withNewFlag:YES 
-                                                            currentAltitude:currentAltitude]];
-        self.isNewLocationAvailable = NO;
-    }
+    // didUpdateLocations에서는 이벤트만 전송하고 플래그는 리셋하지 않음
+    // repeatLocationUpdate에서 플래그를 확인하고 리셋함
 }
 
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error
 {
-    RCTLogError(@"[RNRidableGpsTracker] Location error: %@", error.localizedDescription);
+    // kCLErrorLocationUnknown (0)은 일시적인 에러로 무시
+    // 시뮬레이터에서 위치 변경 시 자주 발생하며, 곧 정상 위치가 들어옴
+    if (error.domain == kCLErrorDomain && error.code == kCLErrorLocationUnknown) {
+        RCTLogInfo(@"[RNRidableGpsTracker] ⚠️ Temporary location unavailable, waiting for next update...");
+        return;
+    }
+    
+    // 그 외 실제 에러만 로깅 및 이벤트 전송
+    RCTLogError(@"[RNRidableGpsTracker] Location error: %@ (code: %ld)", error.localizedDescription, (long)error.code);
     
     if (self.hasListeners) {
         [self sendEventWithName:@"error" body:@{
             @"code": @(error.code),
-            @"message": error.localizedDescription
+            @"message": error.localizedDescription,
+            @"domain": error.domain
         }];
     }
 }
@@ -1081,6 +1086,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
                                                                 withNewFlag:isNew 
                                                             currentAltitude:currentAltitude]];
         
+        // 타이머에서 플래그를 확인하고 리셋
         if (isNew) {
             self.isNewLocationAvailable = NO;
         }
