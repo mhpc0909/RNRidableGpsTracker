@@ -123,9 +123,10 @@ class LocationService : Service(), SensorEventListener {
     private var currentFilteredSpeed: Double = 0.0
     private var lastElapsedUpdateTime: Long = 0
     private var lastMovingUpdateTime: Long = 0
-    private var gradeReferenceLocation: Location? = null
-    private var gradeReferenceAltitude: Double = 0.0
+    private var gradeBaseLocation: Location? = null
+    private var gradeBaseAltitude: Double = 0.0
     private val recentGrades = ArrayDeque<Double>(GRADE_WINDOW_SIZE)
+    private var lastSmoothedGrade: Double = 0.0
     
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
@@ -678,9 +679,10 @@ class LocationService : Service(), SensorEventListener {
         sessionStartTime = SystemClock.elapsedRealtime()
         lastElapsedUpdateTime = sessionStartTime
         lastMovingUpdateTime = sessionStartTime
-        gradeReferenceLocation = null
-        gradeReferenceAltitude = 0.0
+        gradeBaseLocation = null
+        gradeBaseAltitude = 0.0
         recentGrades.clear()
+        lastSmoothedGrade = 0.0
         previousLocation = null
         previousAltitude = 0.0
         lastUpdateTime = 0
@@ -701,8 +703,10 @@ class LocationService : Service(), SensorEventListener {
             previousAltitude = currentAltitude
             lastUpdateTime = locationTime
             lastMovingUpdateTime = systemElapsed
-            gradeReferenceLocation = location
-            gradeReferenceAltitude = currentAltitude
+            gradeBaseLocation = location
+            gradeBaseAltitude = currentAltitude
+            recentGrades.clear()
+            lastSmoothedGrade = 0.0
             return
         }
         
@@ -764,8 +768,6 @@ class LocationService : Service(), SensorEventListener {
             sessionMaxSpeed = currentFilteredSpeed.toFloat()
         }
         
-        gradeReferenceLocation = previousLocation
-        gradeReferenceAltitude = previousAltitude
         previousLocation = location
         previousAltitude = currentAltitude
         lastUpdateTime = locationTime
@@ -792,21 +794,49 @@ class LocationService : Service(), SensorEventListener {
     }
     
     private fun calculateGrade(location: Location, currentAltitude: Double): GradeData {
-        val referenceLocation = gradeReferenceLocation ?: return GradeData(0f, "flat")
-        
-        val horizontalDistance = referenceLocation.distanceTo(location).toDouble()
-        
-        if (horizontalDistance < 5.0 || horizontalDistance > MAX_MOVEMENT_DISTANCE) {
+        val baseLocation = gradeBaseLocation ?: run {
+            gradeBaseLocation = location
+            gradeBaseAltitude = currentAltitude
+            recentGrades.clear()
+            lastSmoothedGrade = 0.0
             return GradeData(0f, "flat")
         }
         
-        val elevationChange = currentAltitude - gradeReferenceAltitude
-        var grade = ((elevationChange / horizontalDistance) * 100.0).toFloat()
-        grade = max(-30f, min(30f, grade))
+        val horizontalDistance = baseLocation.distanceTo(location).toDouble()
         
-        val category = getGradeCategory(grade)
+        if (horizontalDistance < GRADE_DISTANCE_THRESHOLD) {
+            val gradeValue = lastSmoothedGrade.toFloat()
+            return GradeData(gradeValue, getGradeCategory(gradeValue))
+        }
         
-        return GradeData(grade, category)
+        if (horizontalDistance > MAX_MOVEMENT_DISTANCE) {
+            gradeBaseLocation = location
+            gradeBaseAltitude = currentAltitude
+            recentGrades.clear()
+            lastSmoothedGrade = 0.0
+            return GradeData(0f, "flat")
+        }
+        
+        val elevationChange = currentAltitude - gradeBaseAltitude
+        var rawGrade = (elevationChange / horizontalDistance) * 100.0
+        rawGrade = rawGrade.coerceIn(-30.0, 30.0)
+        
+        recentGrades.add(rawGrade)
+        if (recentGrades.size > GRADE_WINDOW_SIZE) {
+            recentGrades.removeAt(0)
+        }
+        
+        lastSmoothedGrade = if (recentGrades.isNotEmpty()) {
+            recentGrades.sum() / recentGrades.size
+        } else {
+            0.0
+        }
+        
+        gradeBaseLocation = location
+        gradeBaseAltitude = currentAltitude
+        
+        val gradeValue = lastSmoothedGrade.toFloat()
+        return GradeData(gradeValue, getGradeCategory(gradeValue))
     }
     
     private fun getGradeCategory(grade: Float): String {

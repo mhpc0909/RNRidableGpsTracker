@@ -109,6 +109,7 @@ static const NSUInteger kGradeWindowSize = 3;
 @property (nonatomic, strong) CLLocation *gradeBaseLocation;
 @property (nonatomic, assign) double gradeBaseAltitude;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *recentGrades;
+@property (nonatomic, assign) double lastSmoothedGrade;
 
 @end
 
@@ -164,6 +165,7 @@ RCT_EXPORT_MODULE()
         _gradeBaseLocation = nil;
         _gradeBaseAltitude = 0.0;
         _recentGrades = [NSMutableArray arrayWithCapacity:kGradeWindowSize];
+        _lastSmoothedGrade = 0.0;
         
         // 광센서와 소음 초기화
         _currentLux = 0.0;
@@ -344,6 +346,8 @@ RCT_EXPORT_MODULE()
     self.gradeBaseLocation = nil;
     self.gradeBaseAltitude = 0.0;
     [self.recentGrades removeAllObjects];
+    self.lastSmoothedGrade = 0.0;
+    [self.recentGrades removeAllObjects];
     
     RCTLogInfo(@"[Stats] Session reset");
 }
@@ -422,8 +426,6 @@ RCT_EXPORT_MODULE()
         self.sessionMaxSpeed = self.currentFilteredSpeed;
     }
     
-    self.gradeBaseLocation = self.previousLocation;
-    self.gradeBaseAltitude = self.previousAltitude;
     self.previousLocation = location;
     self.previousAltitude = currentAltitude;
     self.lastUpdateTime = locationTime;
@@ -436,14 +438,22 @@ RCT_EXPORT_MODULE()
         self.gradeBaseLocation = location;
         self.gradeBaseAltitude = currentAltitude;
         [self.recentGrades removeAllObjects];
-        return 0.0;
+        self.lastSmoothedGrade = 0.0;
+        return self.lastSmoothedGrade;
     }
     
     CLLocationDistance horizontalDistance = [baseLocation distanceFromLocation:location];
     
-    if (horizontalDistance < kGradeDistanceThreshold || horizontalDistance > kMaximumMovementDistance) {
-        NSNumber *lastGrade = self.recentGrades.lastObject;
-        return lastGrade ? lastGrade.doubleValue : 0.0;
+    if (horizontalDistance < kGradeDistanceThreshold) {
+        return self.lastSmoothedGrade;
+    }
+    
+    if (horizontalDistance > kMaximumMovementDistance) {
+        self.gradeBaseLocation = location;
+        self.gradeBaseAltitude = currentAltitude;
+        [self.recentGrades removeAllObjects];
+        self.lastSmoothedGrade = 0.0;
+        return self.lastSmoothedGrade;
     }
     
     double elevationChange = currentAltitude - self.gradeBaseAltitude;
@@ -459,12 +469,16 @@ RCT_EXPORT_MODULE()
     for (NSNumber *value in self.recentGrades) {
         sum += value.doubleValue;
     }
-    double smoothedGrade = sum / (double)self.recentGrades.count;
+    if (self.recentGrades.count > 0) {
+        self.lastSmoothedGrade = sum / (double)self.recentGrades.count;
+    } else {
+        self.lastSmoothedGrade = 0.0;
+    }
     
     self.gradeBaseLocation = location;
     self.gradeBaseAltitude = currentAltitude;
     
-    return smoothedGrade;
+    return self.lastSmoothedGrade;
 }
 
 - (NSString *)getGradeCategory:(double)grade
