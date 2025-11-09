@@ -84,7 +84,7 @@ export interface LocationData {
   timestamp: number
   isNewLocation: boolean
   isKalmanFiltered: boolean
-  isMoving: boolean // 이동 상태 (속도 >= 0.5 m/s)
+  isMoving: boolean // 이동 상태 (필터링된 속도/거리 기반)
 
   // 기압계 데이터 (선택적)
   enhancedAltitude?: number // GPS + 기압계 보정 고도

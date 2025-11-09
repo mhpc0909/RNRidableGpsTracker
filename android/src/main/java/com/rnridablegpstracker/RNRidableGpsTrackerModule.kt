@@ -229,13 +229,26 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
 
     override fun getCurrentLocation(promise: Promise) {
         try {
-            val location = locationService?.getLastLocation()
-            val sensorData = locationService?.getLastSensorData()
-            
-            if (location != null) {
-                promise.resolve(convertLocationToMap(location, sensorData, isNew = false))
-            } else {
-                promise.reject("NO_LOCATION", "No location available")
+            val service = locationService
+
+            if (service == null || !serviceBound) {
+                promise.reject("SERVICE_NOT_AVAILABLE", "LocationService is not bound")
+                return
+            }
+
+            service.getLastLocation()?.let { cachedLocation ->
+                promise.resolve(convertLocationToMap(cachedLocation, service.getLastSensorData(), isNew = false, includeSensorData = false))
+                return
+            }
+
+            service.requestSingleLocation { location ->
+                mainHandler.post {
+                    if (location != null) {
+                        promise.resolve(convertLocationToMap(location, service.getLastSensorData(), isNew = true, includeSensorData = false))
+                    } else {
+                        promise.reject("TIMEOUT", "Location request timed out")
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to get current location", e)
@@ -326,9 +339,10 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
     }
 
     private fun convertLocationToMap(
-        location: Location, 
+        location: Location,
         sensorData: LocationService.SensorData?,
-        isNew: Boolean
+        isNew: Boolean,
+        includeSensorData: Boolean = true
     ): WritableMap {
         return Arguments.createMap().apply {
             // 기본 GPS 데이터
@@ -336,87 +350,92 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             putDouble("longitude", location.longitude)
             putDouble("altitude", location.altitude)
             putDouble("accuracy", location.accuracy.toDouble())
-            putDouble("speed", if (location.hasSpeed()) location.speed.toDouble() else 0.0)
+            val service = locationService
+            val filteredSpeed = service?.getFilteredSpeed() ?: if (location.hasSpeed()) location.speed.toDouble() else 0.0
+            putDouble("speed", filteredSpeed)
             putDouble("bearing", if (location.hasBearing()) location.bearing.toDouble() else 0.0)
             putDouble("timestamp", location.time.toDouble())
             putBoolean("isNewLocation", isNew)
             putBoolean("isKalmanFiltered", locationService?.isKalmanFiltered() ?: false)
             
-            sensorData?.let { data ->
-                // ✅ 기압계 데이터
-                data.barometer?.let { baro ->
-                    putDouble("enhancedAltitude", baro.enhancedAltitude.toDouble())
-                    putDouble("relativeAltitude", baro.relativeAltitude.toDouble())
-                    putDouble("pressure", baro.pressure.toDouble())
-                }
-                
-                // ✅ 운동 분석 데이터 (Native 분석 결과)
-                data.motionAnalysis?.let { motion ->
-                    val motionMap = Arguments.createMap().apply {
-                        putString("roadSurfaceQuality", motion.roadSurfaceQuality)
-                        putDouble("vibrationLevel", motion.vibrationLevel.toDouble())
-                        putDouble("vibrationIntensity", motion.vibrationIntensity.toDouble())
-                        putDouble("corneringIntensity", motion.corneringIntensity.toDouble())
-                        putDouble("inclineAngle", motion.inclineAngle.toDouble())
-                        putBoolean("isClimbing", motion.isClimbing)
-                        putBoolean("isDescending", motion.isDescending)
-                        putDouble("verticalAcceleration", motion.verticalAcceleration.toDouble())
+            if (includeSensorData) {
+                sensorData?.let { data ->
+                    // ✅ 기압계 데이터
+                    data.barometer?.let { baro ->
+                        putDouble("enhancedAltitude", baro.enhancedAltitude.toDouble())
+                        putDouble("relativeAltitude", baro.relativeAltitude.toDouble())
+                        putDouble("pressure", baro.pressure.toDouble())
                     }
-                    putMap("motionAnalysis", motionMap)
-                }
-                
-                // ✅ Grade 데이터
-                data.grade?.let { grade ->
-                    putDouble("grade", grade.grade.toDouble())
-                    putString("gradeCategory", grade.gradeCategory)
-                }
-                
-                // ✅ 세션 통계
-                data.sessionStats?.let { stats ->
-                    putDouble("sessionDistance", stats.distance)
-                    putDouble("sessionElevationGain", stats.elevationGain)
-                    putDouble("sessionElevationLoss", stats.elevationLoss)
-                    putDouble("sessionMovingTime", stats.movingTime)
-                    putDouble("sessionElapsedTime", stats.elapsedTime)
-                    putDouble("sessionMaxSpeed", stats.maxSpeed.toDouble())
-                    putDouble("sessionAvgSpeed", stats.avgSpeed)
-                    putDouble("sessionMovingAvgSpeed", stats.movingAvgSpeed)
-                }
-                
-                // ✅ 광센서 데이터
-                data.light?.let { light ->
-                    val lightMap = Arguments.createMap().apply {
-                        putDouble("lux", light.lux.toDouble())
-                        putString("condition", light.condition)
-                        putBoolean("isLowLight", light.isLowLight)
+                    
+                    // ✅ 운동 분석 데이터 (Native 분석 결과)
+                    data.motionAnalysis?.let { motion ->
+                        val motionMap = Arguments.createMap().apply {
+                            putString("roadSurfaceQuality", motion.roadSurfaceQuality)
+                            putDouble("vibrationLevel", motion.vibrationLevel.toDouble())
+                            putDouble("vibrationIntensity", motion.vibrationIntensity.toDouble())
+                            putDouble("corneringIntensity", motion.corneringIntensity.toDouble())
+                            putDouble("inclineAngle", motion.inclineAngle.toDouble())
+                            putBoolean("isClimbing", motion.isClimbing)
+                            putBoolean("isDescending", motion.isDescending)
+                            putDouble("verticalAcceleration", motion.verticalAcceleration.toDouble())
+                        }
+                        putMap("motionAnalysis", motionMap)
                     }
-                    putMap("light", lightMap)
-                }
-                
-                // ✅ 소음 데이터
-                data.noise?.let { noise ->
-                    val noiseMap = Arguments.createMap().apply {
-                        putDouble("decibel", noise.decibel.toDouble())
-                        putString("noiseLevel", noise.noiseLevel)
+                    
+                    // ✅ Grade 데이터
+                    data.grade?.let { grade ->
+                        putDouble("grade", grade.grade.toDouble())
+                        putString("gradeCategory", grade.gradeCategory)
                     }
-                    putMap("noise", noiseMap)
-                }
-                
-                // ✅ 자기장 데이터
-                data.magnetometer?.let { mag ->
-                    val magnetometerMap = Arguments.createMap().apply {
-                        putDouble("heading", mag.heading.toDouble())
-                        putDouble("magneticFieldStrength", mag.magneticFieldStrength.toDouble())
-                        putDouble("x", mag.x.toDouble())
-                        putDouble("y", mag.y.toDouble())
-                        putDouble("z", mag.z.toDouble())
+                    
+                    // ✅ 세션 통계
+                    data.sessionStats?.let { stats ->
+                        putDouble("sessionDistance", stats.distance)
+                        putDouble("sessionElevationGain", stats.elevationGain)
+                        putDouble("sessionElevationLoss", stats.elevationLoss)
+                        putDouble("sessionMovingTime", stats.movingTime)
+                        putDouble("sessionElapsedTime", stats.elapsedTime)
+                        putDouble("sessionMaxSpeed", stats.maxSpeed.toDouble())
+                        putDouble("sessionAvgSpeed", stats.avgSpeed)
+                        putDouble("sessionMovingAvgSpeed", stats.movingAvgSpeed)
                     }
-                    putMap("magnetometer", magnetometerMap)
+                    
+                    // ✅ 광센서 데이터
+                    data.light?.let { light ->
+                        val lightMap = Arguments.createMap().apply {
+                            putDouble("lux", light.lux.toDouble())
+                            putString("condition", light.condition)
+                            putBoolean("isLowLight", light.isLowLight)
+                        }
+                        putMap("light", lightMap)
+                    }
+                    
+                    // ✅ 소음 데이터
+                    data.noise?.let { noise ->
+                        val noiseMap = Arguments.createMap().apply {
+                            putDouble("decibel", noise.decibel.toDouble())
+                            putString("noiseLevel", noise.noiseLevel)
+                        }
+                        putMap("noise", noiseMap)
+                    }
+                    
+                    // ✅ 자기장 데이터
+                    data.magnetometer?.let { mag ->
+                        val magnetometerMap = Arguments.createMap().apply {
+                            putDouble("heading", mag.heading.toDouble())
+                            putDouble("magneticFieldStrength", mag.magneticFieldStrength.toDouble())
+                            putDouble("x", mag.x.toDouble())
+                            putDouble("y", mag.y.toDouble())
+                            putDouble("z", mag.z.toDouble())
+                        }
+                        putMap("magnetometer", magnetometerMap)
+                    }
                 }
             }
             
             // 이동 상태
-            putBoolean("isMoving", if (location.hasSpeed()) location.speed >= 0.5f else false)
+            val isMoving = service?.isMoving() ?: (filteredSpeed >= 0.5)
+            putBoolean("isMoving", isMoving)
         }
     }
 
@@ -429,7 +448,7 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit("location", convertLocationToMap(location, sensorData, isNew))
+                .emit("location", convertLocationToMap(location, sensorData, isNew, includeSensorData = true))
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send location event", e)
         }

@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
@@ -118,6 +119,13 @@ class LocationService : Service(), SensorEventListener {
     private var previousLocation: Location? = null
     private var previousAltitude: Double = 0.0
     private var lastUpdateTime: Long = 0
+    private var isCurrentlyMoving: Boolean = false
+    private var currentFilteredSpeed: Double = 0.0
+    private var lastElapsedUpdateTime: Long = 0
+    private var lastMovingUpdateTime: Long = 0
+    private var gradeReferenceLocation: Location? = null
+    private var gradeReferenceAltitude: Double = 0.0
+    private val recentGrades = ArrayDeque<Double>(GRADE_WINDOW_SIZE)
     
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
@@ -139,6 +147,13 @@ class LocationService : Service(), SensorEventListener {
         
         private const val SEA_LEVEL_PRESSURE = 1013.25f
         private const val GRAVITY = 9.81f
+        private const val MOVEMENT_SPEED_THRESHOLD = 0.5
+        private const val MOVEMENT_HYSTERESIS = 0.2
+        private const val MIN_MOVEMENT_DISTANCE = 0.5
+        private const val MAX_MOVEMENT_DISTANCE = 100.0
+        private const val MAX_MOVING_TIME_DELTA = 10.0
+        private const val GRADE_DISTANCE_THRESHOLD = 5.0
+        private const val GRADE_WINDOW_SIZE = 3
     }
     
     // 센서 데이터 클래스들
@@ -660,42 +675,84 @@ class LocationService : Service(), SensorEventListener {
         sessionMaxSpeed = 0f
         sessionMovingTime = 0.0
         sessionElapsedTime = 0.0
-        sessionStartTime = System.currentTimeMillis()
+        sessionStartTime = SystemClock.elapsedRealtime()
+        lastElapsedUpdateTime = sessionStartTime
+        lastMovingUpdateTime = sessionStartTime
+        gradeReferenceLocation = null
+        gradeReferenceAltitude = 0.0
+        recentGrades.clear()
         previousLocation = null
         previousAltitude = 0.0
         lastUpdateTime = 0
+        isCurrentlyMoving = false
+        currentFilteredSpeed = 0.0
         
         Log.d(TAG, "[Stats] Session reset")
     }
     
     private fun updateSessionStats(location: Location, currentAltitude: Double) {
-        val currentTime = location.time
+        val systemElapsed = SystemClock.elapsedRealtime()
+        updateElapsedTimeWithMillis(systemElapsed)
+        
+        val locationTime = location.time
         
         if (previousLocation == null) {
             previousLocation = location
             previousAltitude = currentAltitude
-            lastUpdateTime = currentTime
+            lastUpdateTime = locationTime
+            lastMovingUpdateTime = systemElapsed
+            gradeReferenceLocation = location
+            gradeReferenceAltitude = currentAltitude
             return
         }
         
         val distance = previousLocation!!.distanceTo(location).toDouble()
+        val timeDelta = (locationTime - lastUpdateTime) / 1000.0
+        val hasSpeed = location.hasSpeed() && !location.speed.isNaN()
+        val rawSpeed = if (hasSpeed) location.speed.toDouble() else 0.0
         
-        if (distance in 0.5..100.0) {
+        val distanceWithinBounds = distance >= MIN_MOVEMENT_DISTANCE && distance <= MAX_MOVEMENT_DISTANCE
+        val derivedSpeed = if (distanceWithinBounds && timeDelta > 0) distance / timeDelta else 0.0
+        var distanceSuggestsMovement = distanceWithinBounds && derivedSpeed >= MOVEMENT_SPEED_THRESHOLD
+        val speedSuggestsMovement = distanceWithinBounds && hasSpeed && rawSpeed >= MOVEMENT_SPEED_THRESHOLD
+        var moving = distanceSuggestsMovement || speedSuggestsMovement
+        
+        if (!moving && isCurrentlyMoving) {
+            val distanceWithinHysteresis = distance >= MIN_MOVEMENT_DISTANCE * 0.4 && distance <= MAX_MOVEMENT_DISTANCE
+            val hysteresisSatisfied = distanceWithinHysteresis &&
+                ((hasSpeed && rawSpeed >= MOVEMENT_SPEED_THRESHOLD - MOVEMENT_HYSTERESIS) ||
+                 (derivedSpeed >= MOVEMENT_SPEED_THRESHOLD - MOVEMENT_HYSTERESIS))
+            if (hysteresisSatisfied) {
+                moving = true
+                distanceSuggestsMovement = true
+            }
+        }
+        
+        if (distanceWithinBounds) {
             sessionDistance += distance
         }
         
-        val timeDelta = (currentTime - lastUpdateTime) / 1000.0
         if (timeDelta in 0.0..10.0) {
-            sessionElapsedTime += timeDelta
-            
-            if (location.hasSpeed() && location.speed >= 0.5f) {
-                sessionMovingTime += timeDelta
+            if (moving) {
+                val movingDelta = (systemElapsed - lastMovingUpdateTime) / 1000.0
+                if (movingDelta > 0 && movingDelta < MAX_MOVING_TIME_DELTA) {
+                    sessionMovingTime += movingDelta
+                }
+                lastMovingUpdateTime = systemElapsed
+            } else {
+                lastMovingUpdateTime = systemElapsed
             }
+        }
+        
+        currentFilteredSpeed = if (moving) {
+            max(rawSpeed, derivedSpeed)
+        } else {
+            0.0
         }
         
         val elevationChange = currentAltitude - previousAltitude
         
-        if (abs(elevationChange) > 0.5) {
+        if (distanceWithinBounds && abs(elevationChange) > 0.5) {
             if (elevationChange > 0) {
                 sessionElevationGain += elevationChange
             } else {
@@ -703,27 +760,47 @@ class LocationService : Service(), SensorEventListener {
             }
         }
         
-        if (location.hasSpeed() && location.speed > sessionMaxSpeed) {
-            sessionMaxSpeed = location.speed
+        if (currentFilteredSpeed > sessionMaxSpeed) {
+            sessionMaxSpeed = currentFilteredSpeed.toFloat()
         }
         
+        gradeReferenceLocation = previousLocation
+        gradeReferenceAltitude = previousAltitude
         previousLocation = location
         previousAltitude = currentAltitude
-        lastUpdateTime = currentTime
+        lastUpdateTime = locationTime
+        isCurrentlyMoving = moving
+    }
+    
+    private fun updateElapsedTimeWithMillis(timestampMillis: Long) {
+        if (sessionStartTime <= 0) return
+        
+        if (lastElapsedUpdateTime <= 0) {
+            lastElapsedUpdateTime = sessionStartTime
+        }
+        
+        if (timestampMillis < lastElapsedUpdateTime) {
+            lastElapsedUpdateTime = timestampMillis
+            return
+        }
+        
+        val deltaMillis = timestampMillis - lastElapsedUpdateTime
+        if (deltaMillis > 0) {
+            sessionElapsedTime += deltaMillis / 1000.0
+            lastElapsedUpdateTime = timestampMillis
+        }
     }
     
     private fun calculateGrade(location: Location, currentAltitude: Double): GradeData {
-        if (previousLocation == null) {
+        val referenceLocation = gradeReferenceLocation ?: return GradeData(0f, "flat")
+        
+        val horizontalDistance = referenceLocation.distanceTo(location).toDouble()
+        
+        if (horizontalDistance < 5.0 || horizontalDistance > MAX_MOVEMENT_DISTANCE) {
             return GradeData(0f, "flat")
         }
         
-        val horizontalDistance = previousLocation!!.distanceTo(location).toDouble()
-        
-        if (horizontalDistance < 5.0) {
-            return GradeData(0f, "flat")
-        }
-        
-        val elevationChange = currentAltitude - previousAltitude
+        val elevationChange = currentAltitude - gradeReferenceAltitude
         var grade = ((elevationChange / horizontalDistance) * 100.0).toFloat()
         grade = max(-30f, min(30f, grade))
         
@@ -1147,6 +1224,7 @@ class LocationService : Service(), SensorEventListener {
         } else {
             kalmanAltitude
         }
+        updateElapsedTimeWithMillis(SystemClock.elapsedRealtime())
         
         // ✅ 기압계 데이터 (필수)
         val barometerData = currentPressure?.let { pressure ->

@@ -5,6 +5,14 @@
 #import <AVFoundation/AVFoundation.h>
 #import <React/RCTLog.h>
 
+static const double kMovementSpeedThreshold = 0.5;          // m/s
+static const double kMovementHysteresis = 0.2;              // m/s
+static const double kMinimumMovementDistance = 0.5;         // m
+static const double kMaximumMovementDistance = 100.0;       // m
+static const double kMaxMovingTimeDelta = 10.0;             // s
+static const double kGradeDistanceThreshold = 5.0;          // m
+static const NSUInteger kGradeWindowSize = 3;
+
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
 @property (nonatomic, strong) CLLocationManager *locationManager;
 @property (nonatomic, strong) CMAltimeter *altimeter;
@@ -18,6 +26,11 @@
 @property (nonatomic, strong) NSTimer *repeatLocationTimer;
 @property (nonatomic, strong) NSDate *lastLocationTimestamp;
 @property (nonatomic, assign) BOOL isNewLocationAvailable;
+
+// getCurrentLocation 콜백
+@property (nonatomic, copy) RCTPromiseResolveBlock locationRequestResolve;
+@property (nonatomic, copy) RCTPromiseRejectBlock locationRequestReject;
+@property (nonatomic, assign) BOOL wasTrackingBeforeRequest;
 
 // 고도 보정
 @property (nonatomic, assign) double startGpsAltitude;
@@ -86,9 +99,16 @@
 @property (nonatomic, assign) double sessionMovingTime;
 @property (nonatomic, assign) double sessionElapsedTime;
 @property (nonatomic, assign) NSTimeInterval sessionStartTime;
+@property (nonatomic, assign) NSTimeInterval lastElapsedUpdateTime;
+@property (nonatomic, assign) NSTimeInterval lastMovingUpdateTime;
 @property (nonatomic, strong) CLLocation *previousLocation;
 @property (nonatomic, assign) double previousAltitude;
 @property (nonatomic, assign) NSTimeInterval lastUpdateTime;
+@property (nonatomic, assign) BOOL isCurrentlyMoving;
+@property (nonatomic, assign) double currentFilteredSpeed;
+@property (nonatomic, strong) CLLocation *gradeBaseLocation;
+@property (nonatomic, assign) double gradeBaseAltitude;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *recentGrades;
 
 @end
 
@@ -134,9 +154,16 @@ RCT_EXPORT_MODULE()
         _sessionMovingTime = 0.0;
         _sessionElapsedTime = 0.0;
         _sessionStartTime = 0;
+        _lastElapsedUpdateTime = 0;
+        _lastMovingUpdateTime = 0;
         _previousLocation = nil;
         _previousAltitude = 0.0;
         _lastUpdateTime = 0;
+        _isCurrentlyMoving = NO;
+        _currentFilteredSpeed = 0.0;
+        _gradeBaseLocation = nil;
+        _gradeBaseAltitude = 0.0;
+        _recentGrades = [NSMutableArray arrayWithCapacity:kGradeWindowSize];
         
         // 광센서와 소음 초기화
         _currentLux = 0.0;
@@ -144,6 +171,11 @@ RCT_EXPORT_MODULE()
         _currentDecibel = 0.0;
         _lastDecibelTimestamp = 0;
         _noiseTimer = nil;
+        
+        // getCurrentLocation 콜백 초기화
+        _locationRequestResolve = nil;
+        _locationRequestReject = nil;
+        _wasTrackingBeforeRequest = NO;
     }
     return self;
 }
@@ -302,42 +334,83 @@ RCT_EXPORT_MODULE()
     self.sessionMovingTime = 0.0;
     self.sessionElapsedTime = 0.0;
     self.sessionStartTime = [[NSDate date] timeIntervalSince1970];
+    self.lastElapsedUpdateTime = self.sessionStartTime;
+    self.lastMovingUpdateTime = self.sessionStartTime;
     self.previousLocation = nil;
     self.previousAltitude = 0.0;
     self.lastUpdateTime = 0;
+    self.isCurrentlyMoving = NO;
+    self.currentFilteredSpeed = 0.0;
+    self.gradeBaseLocation = nil;
+    self.gradeBaseAltitude = 0.0;
+    [self.recentGrades removeAllObjects];
     
     RCTLogInfo(@"[Stats] Session reset");
 }
 
 - (void)updateSessionStats:(CLLocation *)location currentAltitude:(double)currentAltitude
 {
-    NSTimeInterval currentTime = [location.timestamp timeIntervalSince1970];
+    NSTimeInterval systemTime = [[NSDate date] timeIntervalSince1970];
+    [self updateElapsedTimeWithTimestamp:systemTime];
+    
+    NSTimeInterval locationTime = [location.timestamp timeIntervalSince1970];
     
     if (!self.previousLocation) {
         self.previousLocation = location;
         self.previousAltitude = currentAltitude;
-        self.lastUpdateTime = currentTime;
+        self.lastUpdateTime = locationTime;
+        self.lastMovingUpdateTime = systemTime;
+        self.gradeBaseLocation = location;
+        self.gradeBaseAltitude = currentAltitude;
         return;
     }
     
     CLLocationDistance distance = [self.previousLocation distanceFromLocation:location];
+    NSTimeInterval timeDelta = locationTime - self.lastUpdateTime;
     
-    if (distance > 0.5 && distance < 100) {
-        self.sessionDistance += distance;
-    }
+    BOOL distanceWithinBounds = (distance >= kMinimumMovementDistance && distance <= kMaximumMovementDistance);
+    double derivedSpeed = (distanceWithinBounds && timeDelta > 0) ? distance / timeDelta : 0.0;
+    BOOL distanceSuggestsMovement = (distanceWithinBounds && derivedSpeed >= kMovementSpeedThreshold);
+    BOOL speedSuggestsMovement = (location.speed >= 0 && location.speed >= kMovementSpeedThreshold && distanceWithinBounds);
+    BOOL isMoving = distanceSuggestsMovement || speedSuggestsMovement;
     
-    NSTimeInterval timeDelta = currentTime - self.lastUpdateTime;
-    if (timeDelta > 0 && timeDelta < 10) {
-        self.sessionElapsedTime += timeDelta;
-        
-        if (location.speed >= 0.5) {
-            self.sessionMovingTime += timeDelta;
+    if (!isMoving && self.isCurrentlyMoving) {
+        BOOL distanceWithinHysteresis = (distance >= kMinimumMovementDistance * 0.4 && distance <= kMaximumMovementDistance);
+        BOOL hysteresisSatisfied = distanceWithinHysteresis &&
+            ((location.speed >= 0 && location.speed >= (kMovementSpeedThreshold - kMovementHysteresis)) ||
+             (derivedSpeed >= (kMovementSpeedThreshold - kMovementHysteresis)));
+        if (hysteresisSatisfied) {
+            isMoving = YES;
         }
     }
     
+    if (distanceWithinBounds) {
+        self.sessionDistance += distance;
+    }
+    
+    if (timeDelta > 0 && timeDelta < 10) {
+        if (isMoving) {
+            NSTimeInterval movingDelta = systemTime - self.lastMovingUpdateTime;
+            if (movingDelta > 0 && movingDelta < kMaxMovingTimeDelta) {
+                self.sessionMovingTime += movingDelta;
+            }
+            self.lastMovingUpdateTime = systemTime;
+        } else {
+            self.lastMovingUpdateTime = systemTime;
+        }
+    }
+    
+    if (isMoving) {
+        double candidateSpeed = fmax(location.speed >= 0 ? location.speed : 0.0, derivedSpeed);
+        self.currentFilteredSpeed = candidateSpeed;
+    } else {
+        self.currentFilteredSpeed = 0.0;
+    }
+    self.isCurrentlyMoving = isMoving;
+    
     double elevationChange = currentAltitude - self.previousAltitude;
     
-    if (fabs(elevationChange) > 0.5) {
+    if (distanceWithinBounds && fabs(elevationChange) > 0.5) {
         if (elevationChange > 0) {
             self.sessionElevationGain += elevationChange;
         } else {
@@ -345,31 +418,53 @@ RCT_EXPORT_MODULE()
         }
     }
     
-    if (location.speed >= 0 && location.speed > self.sessionMaxSpeed) {
-        self.sessionMaxSpeed = location.speed;
+    if (self.currentFilteredSpeed > self.sessionMaxSpeed) {
+        self.sessionMaxSpeed = self.currentFilteredSpeed;
     }
     
+    self.gradeBaseLocation = self.previousLocation;
+    self.gradeBaseAltitude = self.previousAltitude;
     self.previousLocation = location;
     self.previousAltitude = currentAltitude;
-    self.lastUpdateTime = currentTime;
+    self.lastUpdateTime = locationTime;
 }
 
 - (double)calculateGrade:(CLLocation *)location currentAltitude:(double)currentAltitude
 {
-    if (!self.previousLocation) {
+    CLLocation *baseLocation = self.gradeBaseLocation;
+    if (!baseLocation) {
+        self.gradeBaseLocation = location;
+        self.gradeBaseAltitude = currentAltitude;
+        [self.recentGrades removeAllObjects];
         return 0.0;
     }
     
-    CLLocationDistance horizontalDistance = [self.previousLocation distanceFromLocation:location];
+    CLLocationDistance horizontalDistance = [baseLocation distanceFromLocation:location];
     
-    if (horizontalDistance < 5.0) {
-        return 0.0;
+    if (horizontalDistance < kGradeDistanceThreshold || horizontalDistance > kMaximumMovementDistance) {
+        NSNumber *lastGrade = self.recentGrades.lastObject;
+        return lastGrade ? lastGrade.doubleValue : 0.0;
     }
     
-    double elevationChange = currentAltitude - self.previousAltitude;
-    double grade = (elevationChange / horizontalDistance) * 100.0;
+    double elevationChange = currentAltitude - self.gradeBaseAltitude;
+    double rawGrade = (elevationChange / horizontalDistance) * 100.0;
+    double clampedGrade = fmax(-30.0, fmin(30.0, rawGrade));
     
-    return fmax(-30.0, fmin(30.0, grade));
+    [self.recentGrades addObject:@(clampedGrade)];
+    if (self.recentGrades.count > kGradeWindowSize) {
+        [self.recentGrades removeObjectAtIndex:0];
+    }
+    
+    double sum = 0.0;
+    for (NSNumber *value in self.recentGrades) {
+        sum += value.doubleValue;
+    }
+    double smoothedGrade = sum / (double)self.recentGrades.count;
+    
+    self.gradeBaseLocation = location;
+    self.gradeBaseAltitude = currentAltitude;
+    
+    return smoothedGrade;
 }
 
 - (NSString *)getGradeCategory:(double)grade
@@ -548,19 +643,61 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
 RCT_EXPORT_METHOD(getCurrentLocation:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
-    if (self.lastLocation) {
-        double currentAltitude;
-        if ([CMAltimeter isRelativeAltitudeAvailable] && self.hasStartGpsAltitude) {
-            currentAltitude = self.enhancedAltitude;
-        } else {
-            currentAltitude = self.kalmanAltitude;
-        }
-        resolve([self convertLocationToDict:self.lastLocation 
-                                withNewFlag:NO 
-                            currentAltitude:currentAltitude]);
+    // 권한 확인
+    CLAuthorizationStatus authStatus;
+    if (@available(iOS 14.0, *)) {
+        authStatus = self.locationManager.authorizationStatus;
     } else {
-        reject(@"NO_LOCATION", @"No location available", nil);
+        authStatus = [CLLocationManager authorizationStatus];
     }
+    
+    if (authStatus == kCLAuthorizationStatusDenied || authStatus == kCLAuthorizationStatusRestricted) {
+        reject(@"PERMISSION_DENIED", @"Location permission denied", nil);
+        return;
+    }
+    
+    if (authStatus == kCLAuthorizationStatusNotDetermined) {
+        reject(@"PERMISSION_NOT_DETERMINED", @"Location permission not determined", nil);
+        return;
+    }
+    
+    // 이미 요청이 진행 중인지 확인
+    @synchronized(self) {
+        if (self.locationRequestResolve) {
+            reject(@"REQUEST_IN_PROGRESS", @"Location request already in progress", nil);
+            return;
+        }
+        
+        // 콜백 저장
+        self.locationRequestResolve = resolve;
+        self.locationRequestReject = reject;
+        self.wasTrackingBeforeRequest = self.isTracking;
+    }
+    
+    // 트래킹 중이 아니면 임시로 위치 업데이트 시작
+    if (!self.isTracking) {
+        [self.locationManager startUpdatingLocation];
+        RCTLogInfo(@"[RNRidableGpsTracker] 📍 Temporary location updates started for getCurrentLocation");
+    }
+    
+    // 타임아웃 타이머 (10초)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @synchronized(self) {
+            if (self.locationRequestReject) {
+                RCTLogWarn(@"[RNRidableGpsTracker] ⚠️ getCurrentLocation timed out");
+                
+                self.locationRequestReject(@"TIMEOUT", @"Location request timed out", nil);
+                self.locationRequestResolve = nil;
+                self.locationRequestReject = nil;
+                
+                // 트래킹 중이 아니었다면 위치 업데이트 중지
+                if (!self.wasTrackingBeforeRequest) {
+                    [self.locationManager stopUpdatingLocation];
+                    RCTLogInfo(@"[RNRidableGpsTracker] 📍 Temporary location updates stopped (timeout)");
+                }
+            }
+        }
+    });
 }
 
 RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
@@ -982,8 +1119,26 @@ RCT_EXPORT_METHOD(openLocationSettings)
     self.lastLocationTimestamp = processedLocation.timestamp;
     self.isNewLocationAvailable = YES;
     
-    // didUpdateLocations에서는 이벤트만 전송하고 플래그는 리셋하지 않음
-    // repeatLocationUpdate에서 플래그를 확인하고 리셋함
+    // getCurrentLocation 콜백 처리
+    @synchronized(self) {
+        if (self.locationRequestResolve) {
+            RCTLogInfo(@"[RNRidableGpsTracker] ✅ getCurrentLocation resolved");
+            
+            self.locationRequestResolve([self convertLocationToDict:processedLocation 
+                                                        withNewFlag:YES 
+                                                    currentAltitude:currentAltitude
+                                                 includeSensorData:NO]);
+            
+            self.locationRequestResolve = nil;
+            self.locationRequestReject = nil;
+            
+            // 트래킹 중이 아니었다면 위치 업데이트 중지
+            if (!self.wasTrackingBeforeRequest) {
+                [self.locationManager stopUpdatingLocation];
+                RCTLogInfo(@"[RNRidableGpsTracker] 📍 Temporary location updates stopped");
+            }
+        }
+    }
 }
 
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error
@@ -997,6 +1152,19 @@ RCT_EXPORT_METHOD(openLocationSettings)
     
     // 그 외 실제 에러만 로깅 및 이벤트 전송
     RCTLogError(@"[RNRidableGpsTracker] Location error: %@ (code: %ld)", error.localizedDescription, (long)error.code);
+    
+    // getCurrentLocation 콜백 에러 처리
+    @synchronized(self) {
+        if (self.locationRequestReject) {
+            self.locationRequestReject(@"LOCATION_ERROR", error.localizedDescription, error);
+            self.locationRequestResolve = nil;
+            self.locationRequestReject = nil;
+            
+            if (!self.wasTrackingBeforeRequest) {
+                [self.locationManager stopUpdatingLocation];
+            }
+        }
+    }
     
     if (self.hasListeners) {
         [self sendEventWithName:@"error" body:@{
@@ -1084,7 +1252,8 @@ RCT_EXPORT_METHOD(openLocationSettings)
         
         [self sendEventWithName:@"location" body:[self convertLocationToDict:self.lastLocation 
                                                                 withNewFlag:isNew 
-                                                            currentAltitude:currentAltitude]];
+                                                            currentAltitude:currentAltitude
+                                                         includeSensorData:YES]];
         
         // 타이머에서 플래그를 확인하고 리셋
         if (isNew) {
@@ -1098,13 +1267,17 @@ RCT_EXPORT_METHOD(openLocationSettings)
 - (NSDictionary *)convertLocationToDict:(CLLocation *)location 
                            withNewFlag:(BOOL)isNew 
                        currentAltitude:(double)currentAltitude
+                    includeSensorData:(BOOL)includeSensorData
 {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    [self updateElapsedTimeWithTimestamp:now];
+    
     NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithDictionary:@{
         @"latitude": @(location.coordinate.latitude),
         @"longitude": @(location.coordinate.longitude),
         @"altitude": @(location.altitude),
         @"accuracy": @(location.horizontalAccuracy),
-        @"speed": @(location.speed >= 0 ? location.speed : 0),
+        @"speed": @(self.currentFilteredSpeed > 0 ? self.currentFilteredSpeed : (location.speed >= 0 ? location.speed : 0)),
         @"bearing": @(location.course >= 0 ? location.course : 0),
         @"timestamp": @([location.timestamp timeIntervalSince1970] * 1000),
         @"isNewLocation": @(isNew),
@@ -1119,29 +1292,29 @@ RCT_EXPORT_METHOD(openLocationSettings)
         @"sessionMaxSpeed": @(self.sessionMaxSpeed),
         @"sessionAvgSpeed": @(self.sessionElapsedTime > 0 ? self.sessionDistance / self.sessionElapsedTime : 0.0),
         @"sessionMovingAvgSpeed": @(self.sessionMovingTime > 0 ? self.sessionDistance / self.sessionMovingTime : 0.0),
-        @"isMoving": @(location.speed >= 0.5)
+        @"isMoving": @(self.isCurrentlyMoving)
     }];
     
     // 기압계 데이터
-    if (self.lastAltitudeData && self.hasStartGpsAltitude) {
-        double relativeAltitude = [self.lastAltitudeData.relativeAltitude doubleValue];
-        double pressure = [self.lastAltitudeData.pressure doubleValue];
+    if (includeSensorData) {
+        if (self.lastAltitudeData && self.hasStartGpsAltitude) {
+            double relativeAltitude = [self.lastAltitudeData.relativeAltitude doubleValue];
+            double pressure = [self.lastAltitudeData.pressure doubleValue];
+            
+            dict[@"enhancedAltitude"] = @(currentAltitude);
+            dict[@"relativeAltitude"] = @(relativeAltitude);
+            dict[@"pressure"] = @(pressure);
+        } else {
+            dict[@"enhancedAltitude"] = @(currentAltitude);
+        }
         
-        dict[@"enhancedAltitude"] = @(currentAltitude);
-        dict[@"relativeAltitude"] = @(relativeAltitude);
-        dict[@"pressure"] = @(pressure);
-        
-        double grade = [self calculateGrade:location currentAltitude:currentAltitude];
-        dict[@"grade"] = @(grade);
-        dict[@"gradeCategory"] = [self getGradeCategory:grade];
-    } else {
         double grade = [self calculateGrade:location currentAltitude:currentAltitude];
         dict[@"grade"] = @(grade);
         dict[@"gradeCategory"] = [self getGradeCategory:grade];
     }
     
     // 모션 분석 결과만 전송 (Raw 센서 데이터 제거됨)
-    if (self.useAccelerometer || self.useGyroscope) {
+    if (includeSensorData && (self.useAccelerometer || self.useGyroscope)) {
         NSDictionary *motionAnalysis = [self generateMotionAnalysis];
         if (motionAnalysis) {
             dict[@"motionAnalysis"] = motionAnalysis;
@@ -1149,7 +1322,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
     }
     
     // 광센서 데이터
-    if (self.useLight && self.lastLuxTimestamp > 0) {
+    if (includeSensorData && self.useLight && self.lastLuxTimestamp > 0) {
         dict[@"light"] = @{
             @"lux": @(self.currentLux),
             @"condition": [self getLightCondition:self.currentLux],
@@ -1158,7 +1331,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
     }
     
     // 소음 데이터
-    if (self.useNoise && self.lastDecibelTimestamp > 0 && self.currentDecibel > 0) {
+    if (includeSensorData && self.useNoise && self.lastDecibelTimestamp > 0 && self.currentDecibel > 0) {
         dict[@"noise"] = @{
             @"decibel": @(self.currentDecibel),
             @"noiseLevel": [self getNoiseLevel:self.currentDecibel]
@@ -1166,7 +1339,7 @@ RCT_EXPORT_METHOD(openLocationSettings)
     }
     
     // 자기장 데이터
-    if (self.useMagnetometer && self.lastMagTimestamp > 0) {
+    if (includeSensorData && self.useMagnetometer && self.lastMagTimestamp > 0) {
         double magneticFieldStrength = sqrt(self.lastMagX * self.lastMagX + 
                                            self.lastMagY * self.lastMagY + 
                                            self.lastMagZ * self.lastMagZ);
@@ -1181,6 +1354,29 @@ RCT_EXPORT_METHOD(openLocationSettings)
     }
     
     return dict;
+}
+
+- (void)updateElapsedTimeWithTimestamp:(NSTimeInterval)timestamp
+{
+    if (self.sessionStartTime <= 0) {
+        return;
+    }
+    
+    if (self.lastElapsedUpdateTime <= 0) {
+        self.lastElapsedUpdateTime = self.sessionStartTime;
+    }
+    
+    if (timestamp < self.lastElapsedUpdateTime) {
+        // 시계가 뒤로 간 경우 현재 시간으로 리셋
+        self.lastElapsedUpdateTime = timestamp;
+        return;
+    }
+    
+    NSTimeInterval delta = timestamp - self.lastElapsedUpdateTime;
+    if (delta > 0) {
+        self.sessionElapsedTime += delta;
+        self.lastElapsedUpdateTime = timestamp;
+    }
 }
 
 #pragma mark - 광센서
