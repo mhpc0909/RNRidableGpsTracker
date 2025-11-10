@@ -12,6 +12,7 @@ static const double kMaximumMovementDistance = 100.0;       // m
 static const double kMaxMovingTimeDelta = 10.0;             // s
 static const double kGradeDistanceThreshold = 5.0;          // m
 static const NSUInteger kGradeWindowSize = 3;
+static const NSUInteger kStationaryGradeResetThreshold = 2;
 
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
 @property (nonatomic, strong) CLLocationManager *locationManager;
@@ -110,6 +111,7 @@ static const NSUInteger kGradeWindowSize = 3;
 @property (nonatomic, assign) double gradeBaseAltitude;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *recentGrades;
 @property (nonatomic, assign) double lastSmoothedGrade;
+@property (nonatomic, assign) NSUInteger stationaryGradeCounter;
 
 @end
 
@@ -193,7 +195,7 @@ RCT_EXPORT_MODULE()
     self.desiredAccuracy = kCLLocationAccuracyBest;
     self.locationManager.distanceFilter = self.distanceFilter;
     self.locationManager.desiredAccuracy = self.desiredAccuracy;
-    self.locationManager.activityType = CLActivityTypeFitness;
+    self.locationManager.activityType = CLActivityTypeOtherNavigation;
     
     RCTLogInfo(@"[RNRidableGpsTracker] ✅ Location manager configured");
 }
@@ -561,28 +563,28 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
         self.exerciseType = exerciseType;
         
         if ([exerciseType isEqualToString:@"bicycle"]) {
-            self.locationManager.activityType = CLActivityTypeFitness;
+            self.locationManager.activityType = CLActivityTypeOtherNavigation;
             self.useKalmanFilter = NO;
             self.processNoise = 0.0;
             
         } else if ([exerciseType isEqualToString:@"running"]) {
-            self.locationManager.activityType = CLActivityTypeFitness;
+            self.locationManager.activityType = CLActivityTypeOtherNavigation;
             self.useKalmanFilter = YES;
             self.processNoise = 0.5;
             
         } else if ([exerciseType isEqualToString:@"hiking"]) {
-            self.locationManager.activityType = CLActivityTypeFitness;
+            self.locationManager.activityType = CLActivityTypeOtherNavigation;
             self.useKalmanFilter = YES;
             self.processNoise = 1.0;
             
         } else if ([exerciseType isEqualToString:@"walking"]) {
-            self.locationManager.activityType = CLActivityTypeFitness;
+            self.locationManager.activityType = CLActivityTypeOtherNavigation;
             self.useKalmanFilter = YES;
             self.processNoise = 2.0;
         }
     } else {
         self.exerciseType = @"bicycle";
-        self.locationManager.activityType = CLActivityTypeFitness;
+        self.locationManager.activityType = CLActivityTypeOtherNavigation;
         self.useKalmanFilter = NO;
     }
     
