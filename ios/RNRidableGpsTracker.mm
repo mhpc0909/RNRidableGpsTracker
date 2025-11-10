@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <React/RCTLog.h>
+#import <math.h>
 
 static const double kMovementSpeedThreshold = 0.5;          // m/s
 static const double kMovementHysteresis = 0.2;              // m/s
@@ -112,6 +113,10 @@ static const NSUInteger kStationaryGradeResetThreshold = 2;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *recentGrades;
 @property (nonatomic, assign) double lastSmoothedGrade;
 @property (nonatomic, assign) NSUInteger stationaryGradeCounter;
+@property (nonatomic, assign) double lastRawLatitude;
+@property (nonatomic, assign) double lastRawLongitude;
+@property (nonatomic, assign) double lastRawAltitude;
+@property (nonatomic, assign) BOOL hasLastRawLocation;
 
 @end
 
@@ -168,6 +173,7 @@ RCT_EXPORT_MODULE()
         _gradeBaseAltitude = 0.0;
         _recentGrades = [NSMutableArray arrayWithCapacity:kGradeWindowSize];
         _lastSmoothedGrade = 0.0;
+        _stationaryGradeCounter = 0;
         
         // 광센서와 소음 초기화
         _currentLux = 0.0;
@@ -175,6 +181,10 @@ RCT_EXPORT_MODULE()
         _currentDecibel = 0.0;
         _lastDecibelTimestamp = 0;
         _noiseTimer = nil;
+        _lastRawLatitude = 0.0;
+        _lastRawLongitude = 0.0;
+        _lastRawAltitude = 0.0;
+        _hasLastRawLocation = NO;
         
         // getCurrentLocation 콜백 초기화
         _locationRequestResolve = nil;
@@ -345,11 +355,12 @@ RCT_EXPORT_MODULE()
     self.lastUpdateTime = 0;
     self.isCurrentlyMoving = NO;
     self.currentFilteredSpeed = 0.0;
-    self.gradeBaseLocation = nil;
-    self.gradeBaseAltitude = 0.0;
-    [self.recentGrades removeAllObjects];
-    self.lastSmoothedGrade = 0.0;
-    [self.recentGrades removeAllObjects];
+    [self resetGradeTrackingWithLocation:nil currentAltitude:0.0];
+    self.stationaryGradeCounter = 0;
+    self.hasLastRawLocation = NO;
+    self.lastRawLatitude = 0.0;
+    self.lastRawLongitude = 0.0;
+    self.lastRawAltitude = 0.0;
     
     RCTLogInfo(@"[Stats] Session reset");
 }
@@ -366,8 +377,7 @@ RCT_EXPORT_MODULE()
         self.previousAltitude = currentAltitude;
         self.lastUpdateTime = locationTime;
         self.lastMovingUpdateTime = systemTime;
-        self.gradeBaseLocation = location;
-        self.gradeBaseAltitude = currentAltitude;
+        [self resetGradeTrackingWithLocation:location currentAltitude:currentAltitude];
         return;
     }
     
@@ -437,10 +447,7 @@ RCT_EXPORT_MODULE()
 {
     CLLocation *baseLocation = self.gradeBaseLocation;
     if (!baseLocation) {
-        self.gradeBaseLocation = location;
-        self.gradeBaseAltitude = currentAltitude;
-        [self.recentGrades removeAllObjects];
-        self.lastSmoothedGrade = 0.0;
+        [self resetGradeTrackingWithLocation:location currentAltitude:currentAltitude];
         return self.lastSmoothedGrade;
     }
     
@@ -451,10 +458,7 @@ RCT_EXPORT_MODULE()
     }
     
     if (horizontalDistance > kMaximumMovementDistance) {
-        self.gradeBaseLocation = location;
-        self.gradeBaseAltitude = currentAltitude;
-        [self.recentGrades removeAllObjects];
-        self.lastSmoothedGrade = 0.0;
+        [self resetGradeTrackingWithLocation:location currentAltitude:currentAltitude];
         return self.lastSmoothedGrade;
     }
     
@@ -481,6 +485,54 @@ RCT_EXPORT_MODULE()
     self.gradeBaseAltitude = currentAltitude;
     
     return self.lastSmoothedGrade;
+}
+
+- (double)resolveGradeForLocation:(CLLocation *)location
+                 currentAltitude:(double)currentAltitude
+          updateStationaryState:(BOOL)updateStationaryState
+{
+    BOOL shouldZero = [self handleStationaryGradeStateForLocation:location
+                                                currentAltitude:currentAltitude
+                                           updateStationaryState:updateStationaryState];
+    if (shouldZero) {
+        return 0.0;
+    }
+    return [self calculateGrade:location currentAltitude:currentAltitude];
+}
+
+- (BOOL)handleStationaryGradeStateForLocation:(CLLocation *)location
+                             currentAltitude:(double)currentAltitude
+                        updateStationaryState:(BOOL)updateStationaryState
+{
+    if (self.isCurrentlyMoving) {
+        if (updateStationaryState) {
+            self.stationaryGradeCounter = 0;
+        }
+        return NO;
+    }
+    
+    if (updateStationaryState && self.stationaryGradeCounter < kStationaryGradeResetThreshold) {
+        self.stationaryGradeCounter += 1;
+    }
+    
+    BOOL shouldZero = self.stationaryGradeCounter >= kStationaryGradeResetThreshold;
+    if (shouldZero) {
+        [self resetGradeTrackingWithLocation:location currentAltitude:currentAltitude];
+    }
+    return shouldZero;
+}
+
+- (void)resetGradeTrackingWithLocation:(CLLocation *)location currentAltitude:(double)currentAltitude
+{
+    if (location) {
+        self.gradeBaseLocation = location;
+        self.gradeBaseAltitude = currentAltitude;
+    } else {
+        self.gradeBaseLocation = nil;
+        self.gradeBaseAltitude = 0.0;
+    }
+    [self.recentGrades removeAllObjects];
+    self.lastSmoothedGrade = 0.0;
 }
 
 - (NSString *)getGradeCategory:(double)grade
@@ -648,6 +700,9 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
     [self stopNoiseMeasurement];
     [self resetKalmanFilter];
     [self resetAltitudeKalmanFilter];
+    [self resetGradeTrackingWithLocation:nil currentAltitude:0.0];
+    self.stationaryGradeCounter = 0;
+    self.hasLastRawLocation = NO;
     
     RCTLogInfo(@"[RNRidableGpsTracker] 🛑 Tracking stopped");
     RCTLogInfo(@"[Stats] Final - Distance: %.2fm, Elevation Gain: %.2fm, Loss: %.2fm, Max Speed: %.2fm/s, Moving Time: %.0fs, Elapsed Time: %.0fs",
@@ -1106,6 +1161,15 @@ RCT_EXPORT_METHOD(openLocationSettings)
     CLLocation *location = locations.lastObject;
     if (!location) return;
     
+    self.lastRawLatitude = location.coordinate.latitude;
+    self.lastRawLongitude = location.coordinate.longitude;
+    if (location.verticalAccuracy >= 0) {
+        self.lastRawAltitude = location.altitude;
+    } else {
+        self.lastRawAltitude = NAN;
+    }
+    self.hasLastRawLocation = YES;
+    
     CLLocation *processedLocation = location;
     if (self.useKalmanFilter) {
         processedLocation = [self applyKalmanFilter:location];
@@ -1311,6 +1375,21 @@ RCT_EXPORT_METHOD(openLocationSettings)
         @"isMoving": @(self.isCurrentlyMoving)
     }];
     
+    double rawLatitude = self.hasLastRawLocation ? self.lastRawLatitude : location.coordinate.latitude;
+    double rawLongitude = self.hasLastRawLocation ? self.lastRawLongitude : location.coordinate.longitude;
+    dict[@"rawLatitude"] = @(rawLatitude);
+    dict[@"rawLongitude"] = @(rawLongitude);
+    
+    double rawAltitudeCandidate = NAN;
+    if (self.hasLastRawLocation && !isnan(self.lastRawAltitude)) {
+        rawAltitudeCandidate = self.lastRawAltitude;
+    } else if (location.verticalAccuracy >= 0) {
+        rawAltitudeCandidate = location.altitude;
+    }
+    if (!isnan(rawAltitudeCandidate)) {
+        dict[@"rawAltitude"] = @(rawAltitudeCandidate);
+    }
+    
     // 기압계 데이터
     if (includeSensorData) {
         if (self.lastAltitudeData && self.hasStartGpsAltitude) {
@@ -1324,7 +1403,9 @@ RCT_EXPORT_METHOD(openLocationSettings)
             dict[@"enhancedAltitude"] = @(currentAltitude);
         }
         
-        double grade = [self calculateGrade:location currentAltitude:currentAltitude];
+        double grade = [self resolveGradeForLocation:location
+                                     currentAltitude:currentAltitude
+                              updateStationaryState:YES];
         dict[@"grade"] = @(grade);
         dict[@"gradeCategory"] = [self getGradeCategory:grade];
     }

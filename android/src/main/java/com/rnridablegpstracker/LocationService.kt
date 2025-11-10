@@ -130,6 +130,10 @@ class LocationService : Service(), SensorEventListener {
     private var gradeBaseAltitude: Double = 0.0
     private val recentGrades = mutableListOf<Double>()
     private var lastSmoothedGrade: Double = 0.0
+    private var stationaryGradeCounter: Int = 0
+    private var lastRawLatitude: Double? = null
+    private var lastRawLongitude: Double? = null
+    private var lastRawAltitude: Double? = null
     
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
@@ -158,6 +162,7 @@ class LocationService : Service(), SensorEventListener {
         private const val MAX_MOVING_TIME_DELTA = 10.0
         private const val GRADE_DISTANCE_THRESHOLD = 5.0
         private const val GRADE_WINDOW_SIZE = 3
+        private const val STATIONARY_GRADE_RESET_THRESHOLD = 2
     }
     
     // 센서 데이터 클래스들
@@ -394,6 +399,11 @@ class LocationService : Service(), SensorEventListener {
         lastDecibelTimestamp = 0
         
         stopNoiseMeasurement()
+        resetGradeTracking()
+        stationaryGradeCounter = 0
+        lastRawLatitude = null
+        lastRawLongitude = null
+        lastRawAltitude = null
         
         Log.d(TAG, "📊 All sensors stopped")
     }
@@ -682,15 +692,16 @@ class LocationService : Service(), SensorEventListener {
         sessionStartTime = SystemClock.elapsedRealtime()
         lastElapsedUpdateTime = sessionStartTime
         lastMovingUpdateTime = sessionStartTime
-        gradeBaseLocation = null
-        gradeBaseAltitude = 0.0
-        recentGrades.clear()
-        lastSmoothedGrade = 0.0
+        resetGradeTracking()
+        stationaryGradeCounter = 0
         previousLocation = null
         previousAltitude = 0.0
         lastUpdateTime = 0
         isCurrentlyMoving = false
         currentFilteredSpeed = 0.0
+        lastRawLatitude = null
+        lastRawLongitude = null
+        lastRawAltitude = null
         
         Log.d(TAG, "[Stats] Session reset")
     }
@@ -840,6 +851,57 @@ class LocationService : Service(), SensorEventListener {
         
         val gradeValue = lastSmoothedGrade.toFloat()
         return GradeData(gradeValue, getGradeCategory(gradeValue))
+    }
+    
+    private fun resolveGradeData(
+        location: Location,
+        currentAltitude: Double,
+        moving: Boolean,
+        updateStationaryState: Boolean
+    ): GradeData {
+        val shouldZeroGrade = handleStationaryGradeState(
+            location,
+            currentAltitude,
+            moving,
+            updateStationaryState
+        )
+        return if (shouldZeroGrade) {
+            GradeData(0f, "flat")
+        } else {
+            calculateGrade(location, currentAltitude)
+        }
+    }
+
+    private fun handleStationaryGradeState(
+        location: Location,
+        currentAltitude: Double,
+        moving: Boolean,
+        updateStationaryState: Boolean
+    ): Boolean {
+        if (moving) {
+            if (updateStationaryState) {
+                stationaryGradeCounter = 0
+            }
+            return false
+        }
+
+        if (updateStationaryState && stationaryGradeCounter < STATIONARY_GRADE_RESET_THRESHOLD) {
+            stationaryGradeCounter++
+        }
+
+        val shouldZero = stationaryGradeCounter >= STATIONARY_GRADE_RESET_THRESHOLD
+        if (shouldZero) {
+            resetGradeTracking(location, currentAltitude)
+        }
+
+        return shouldZero
+    }
+
+    private fun resetGradeTracking(location: Location? = null, currentAltitude: Double? = null) {
+        gradeBaseLocation = location?.let { Location(it) }
+        gradeBaseAltitude = currentAltitude ?: 0.0
+        recentGrades.clear()
+        lastSmoothedGrade = 0.0
     }
     
     private fun getGradeCategory(grade: Float): String {
@@ -1163,6 +1225,14 @@ class LocationService : Service(), SensorEventListener {
                 override fun onLocationResult(locationResult: LocationResult) {
                     locationResult.lastLocation?.let { location ->
                         if (location.provider == "gps" || location.provider == "fused") {
+                            lastRawLatitude = location.latitude
+                            lastRawLongitude = location.longitude
+                            lastRawAltitude = if (location.hasAltitude()) {
+                                location.altitude
+                            } else {
+                                null
+                            }
+
                             val processedLocation = if (useKalmanFilter) {
                                 applyKalmanFilter(location)
                             } else {
@@ -1272,9 +1342,11 @@ class LocationService : Service(), SensorEventListener {
         val motionAnalysis = if (useAccelerometer || useGyroscope) {
             generateMotionAnalysis()
         } else null
+
+        val moving = isCurrentlyMoving
         
         // ✅ Grade 데이터
-        val gradeData = calculateGrade(location, currentAltitude)
+        val gradeData = resolveGradeData(location, currentAltitude, moving, updateStationaryState = true)
         
         // ✅ 세션 통계
         val sessionStats = SessionStats(
@@ -1387,6 +1459,12 @@ class LocationService : Service(), SensorEventListener {
     
     fun getFilteredSpeed(): Double = currentFilteredSpeed
     
+    fun getLastRawLatitude(): Double? = lastRawLatitude
+    
+    fun getLastRawLongitude(): Double? = lastRawLongitude
+    
+    fun getLastRawAltitude(): Double? = lastRawAltitude
+    
     fun getLastSensorData(): SensorData? {
         val currentAltitude = if (pressureSensor != null && startGpsAltitude != null) {
             enhancedAltitude.toDouble()
@@ -1400,8 +1478,10 @@ class LocationService : Service(), SensorEventListener {
         
         val motionAnalysis = if (useAccelerometer || useGyroscope) generateMotionAnalysis() else null
         
+        val moving = isCurrentlyMoving
+        
         val gradeData = lastLocation?.let { location ->
-            calculateGrade(location, currentAltitude)
+            resolveGradeData(location, currentAltitude, moving, updateStationaryState = false)
         }
         
         val sessionStats = SessionStats(

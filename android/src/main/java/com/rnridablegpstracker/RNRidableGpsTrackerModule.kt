@@ -358,6 +358,17 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             putBoolean("isNewLocation", isNew)
             putBoolean("isKalmanFiltered", locationService?.isKalmanFiltered() ?: false)
             
+            val rawLatitude = service?.getLastRawLatitude() ?: location.latitude
+            val rawLongitude = service?.getLastRawLongitude() ?: location.longitude
+            putDouble("rawLatitude", rawLatitude)
+            putDouble("rawLongitude", rawLongitude)
+            val rawAltitude = service?.getLastRawAltitude()
+            if (rawAltitude != null) {
+                putDouble("rawAltitude", rawAltitude)
+            } else if (location.hasAltitude()) {
+                putDouble("rawAltitude", location.altitude)
+            }
+            
             if (includeSensorData) {
                 sensorData?.let { data ->
                     // ✅ 기압계 데이터
