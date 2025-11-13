@@ -725,14 +725,27 @@ class LocationService : Service(), SensorEventListener {
         }
         
         val distance = previousLocation!!.distanceTo(location).toDouble()
-        val timeDelta = (locationTime - lastUpdateTime) / 1000.0
+        
+        // Mock location의 경우 타임스탬프가 동일할 수 있으므로 실제 수신 시간 사용
+        val currentTime = System.currentTimeMillis()
+        var timeDelta = (locationTime - lastUpdateTime) / 1000.0
+        
+        // 타임스탬프가 동일하거나 유효하지 않은 경우 최소값 보장
+        if (timeDelta <= 0) {
+            timeDelta = 0.1
+        }
+        
         val hasSpeed = location.hasSpeed() && !location.speed.isNaN()
         val rawSpeed = if (hasSpeed) location.speed.toDouble() else 0.0
         
         val distanceWithinBounds = distance >= MIN_MOVEMENT_DISTANCE && distance <= MAX_MOVEMENT_DISTANCE
         val derivedSpeed = if (distanceWithinBounds && timeDelta > 0) distance / timeDelta else 0.0
         var distanceSuggestsMovement = distanceWithinBounds && derivedSpeed >= MOVEMENT_SPEED_THRESHOLD
-        val speedSuggestsMovement = distanceWithinBounds && hasSpeed && rawSpeed >= MOVEMENT_SPEED_THRESHOLD
+        
+        // 속도 정보가 있고 임계값 이상이면 이동 중으로 판단
+        // 거리가 0이어도 속도 정보가 있으면 사용 (Mock location 대응)
+        val speedSuggestsMovement = hasSpeed && rawSpeed >= MOVEMENT_SPEED_THRESHOLD
+        
         var moving = distanceSuggestsMovement || speedSuggestsMovement
         
         if (!moving && isCurrentlyMoving) {
@@ -763,7 +776,12 @@ class LocationService : Service(), SensorEventListener {
         }
         
         currentFilteredSpeed = if (moving) {
-            max(rawSpeed, derivedSpeed)
+            // 속도 정보가 있으면 우선 사용 (Mock location 대응)
+            if (hasSpeed && rawSpeed > 0) {
+                max(rawSpeed, derivedSpeed)
+            } else {
+                derivedSpeed
+            }
         } else {
             0.0
         }
