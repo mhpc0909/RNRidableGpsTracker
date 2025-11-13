@@ -118,6 +118,11 @@ static const NSUInteger kStationaryGradeResetThreshold = 2;
 @property (nonatomic, assign) double lastRawAltitude;
 @property (nonatomic, assign) BOOL hasLastRawLocation;
 
+// Pause 관련 상태
+@property (nonatomic, assign) BOOL isPaused;
+@property (nonatomic, assign) NSTimeInterval pauseStartTime;
+@property (nonatomic, assign) BOOL skipNextDistanceUpdate;  // Resume 후 첫 번째 거리 계산 건너뛰기
+
 @end
 
 @implementation RNRidableGpsTracker
@@ -185,6 +190,11 @@ RCT_EXPORT_MODULE()
         _lastRawLongitude = 0.0;
         _lastRawAltitude = 0.0;
         _hasLastRawLocation = NO;
+        
+        // Pause 상태 초기화
+        _isPaused = NO;
+        _pauseStartTime = 0;
+        _skipNextDistanceUpdate = NO;
         
         // getCurrentLocation 콜백 초기화
         _locationRequestResolve = nil;
@@ -362,11 +372,21 @@ RCT_EXPORT_MODULE()
     self.lastRawLongitude = 0.0;
     self.lastRawAltitude = 0.0;
     
+    // Pause 상태 초기화
+    self.isPaused = NO;
+    self.pauseStartTime = 0;
+    self.skipNextDistanceUpdate = NO;
+    
     RCTLogInfo(@"[Stats] Session reset");
 }
 
 - (void)updateSessionStats:(CLLocation *)location currentAltitude:(double)currentAltitude
 {
+    // Pause 중이면 통계 업데이트 안 함 (위치 트래킹은 지속)
+    if (self.isPaused) {
+        return;
+    }
+    
     NSTimeInterval systemTime = [[NSDate date] timeIntervalSince1970];
     [self updateElapsedTimeWithTimestamp:systemTime];
     
@@ -378,6 +398,21 @@ RCT_EXPORT_MODULE()
         self.lastUpdateTime = locationTime;
         self.lastMovingUpdateTime = systemTime;
         [self resetGradeTrackingWithLocation:location currentAltitude:currentAltitude];
+        return;
+    }
+    
+    // Resume 후 첫 번째 GPS 업데이트는 거리 계산 건너뛰기
+    // (pause 시점 위치와 resume 후 위치 사이의 거리는 포함하지 않음)
+    if (self.skipNextDistanceUpdate) {
+        self.skipNextDistanceUpdate = NO;
+        // previousLocation을 현재 위치로 업데이트 (거리 계산 없이)
+        self.previousLocation = location;
+        self.previousAltitude = currentAltitude;
+        self.lastUpdateTime = locationTime;
+        self.lastMovingUpdateTime = systemTime;
+        // Grade 기준점도 현재 위치로 재설정
+        [self resetGradeTrackingWithLocation:location currentAltitude:currentAltitude];
+        RCTLogInfo(@"[Resume] Skipped first distance update after resume");
         return;
     }
     
@@ -688,6 +723,56 @@ RCT_EXPORT_METHOD(start:(RCTPromiseResolveBlock)resolve
     });
 }
 
+RCT_EXPORT_METHOD(pause:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!self.isTracking) {
+        reject(@"NOT_TRACKING", @"Tracking not started", nil);
+        return;
+    }
+    
+    if (self.isPaused) {
+        reject(@"ALREADY_PAUSED", @"Already paused", nil);
+        return;
+    }
+    
+    self.isPaused = YES;
+    self.pauseStartTime = [[NSDate date] timeIntervalSince1970];
+    
+    RCTLogInfo(@"[RNRidableGpsTracker] ⏸️ Tracking paused");
+    resolve(nil);
+}
+
+RCT_EXPORT_METHOD(resume:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!self.isTracking) {
+        reject(@"NOT_TRACKING", @"Tracking not started", nil);
+        return;
+    }
+    
+    if (!self.isPaused) {
+        reject(@"NOT_PAUSED", @"Not paused", nil);
+        return;
+    }
+    
+    NSTimeInterval resumeTime = [[NSDate date] timeIntervalSince1970];
+    
+    // Resume 시점에 lastElapsedUpdateTime을 현재 시간으로 업데이트
+    // 이렇게 하면 pause 기간이 자동으로 제외됨
+    self.lastElapsedUpdateTime = resumeTime;
+    
+    // Resume 후 첫 번째 GPS 업데이트에서 거리 계산을 건너뛰도록 플래그 설정
+    // (pause 시점 위치와 resume 후 위치 사이의 거리는 포함하지 않음)
+    self.skipNextDistanceUpdate = YES;
+    
+    self.isPaused = NO;
+    self.pauseStartTime = 0;
+    
+    RCTLogInfo(@"[RNRidableGpsTracker] ▶️ Tracking resumed");
+    resolve(nil);
+}
+
 RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
@@ -703,6 +788,11 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
     [self resetGradeTrackingWithLocation:nil currentAltitude:0.0];
     self.stationaryGradeCounter = 0;
     self.hasLastRawLocation = NO;
+    
+    // Pause 상태 초기화
+    self.isPaused = NO;
+    self.pauseStartTime = 0;
+    self.skipNextDistanceUpdate = NO;
     
     RCTLogInfo(@"[RNRidableGpsTracker] 🛑 Tracking stopped");
     RCTLogInfo(@"[Stats] Final - Distance: %.2fm, Elevation Gain: %.2fm, Loss: %.2fm, Max Speed: %.2fm/s, Moving Time: %.0fs, Elapsed Time: %.0fs",
@@ -805,6 +895,7 @@ RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
     
     NSDictionary *result = @{
         @"isRunning": @(self.isTracking),
+        @"isPaused": @(self.isPaused),
         @"isAuthorized": @(authStatus == kCLAuthorizationStatusAuthorizedAlways || 
                           authStatus == kCLAuthorizationStatusAuthorizedWhenInUse),
         @"authorizationStatus": status,
@@ -1349,8 +1440,11 @@ RCT_EXPORT_METHOD(openLocationSettings)
                        currentAltitude:(double)currentAltitude
                     includeSensorData:(BOOL)includeSensorData
 {
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    [self updateElapsedTimeWithTimestamp:now];
+    // Pause 중이면 경과 시간 업데이트 안 함
+    if (!self.isPaused) {
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        [self updateElapsedTimeWithTimestamp:now];
+    }
     
     NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithDictionary:@{
         @"latitude": @(location.coordinate.latitude),
