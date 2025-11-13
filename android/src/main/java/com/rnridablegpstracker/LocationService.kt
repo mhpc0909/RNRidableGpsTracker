@@ -135,6 +135,13 @@ class LocationService : Service(), SensorEventListener {
     private var lastRawLongitude: Double? = null
     private var lastRawAltitude: Double? = null
     
+    // Pause 관련 상태
+    private var isPaused: Boolean = false
+    private var pauseStartTime: Long = 0
+    private var pausedPreviousLocation: Location? = null
+    private var pausedPreviousAltitude: Double = 0.0
+    private var skipNextDistanceUpdate: Boolean = false  // Resume 후 첫 번째 거리 계산 건너뛰기
+    
     // 1초마다 마지막 위치 전송용
     private val handler = Handler(Looper.getMainLooper())
     private var repeatLocationRunnable: Runnable? = null
@@ -703,10 +710,22 @@ class LocationService : Service(), SensorEventListener {
         lastRawLongitude = null
         lastRawAltitude = null
         
+        // Pause 상태 초기화
+        isPaused = false
+        pauseStartTime = 0
+        pausedPreviousLocation = null
+        pausedPreviousAltitude = 0.0
+        skipNextDistanceUpdate = false
+        
         Log.d(TAG, "[Stats] Session reset")
     }
     
     private fun updateSessionStats(location: Location, currentAltitude: Double) {
+        // Pause 중이면 통계 업데이트 안 함 (위치 트래킹은 지속)
+        if (isPaused) {
+            return
+        }
+        
         val systemElapsed = SystemClock.elapsedRealtime()
         updateElapsedTimeWithMillis(systemElapsed)
         
@@ -721,6 +740,24 @@ class LocationService : Service(), SensorEventListener {
             gradeBaseAltitude = currentAltitude
             recentGrades.clear()
             lastSmoothedGrade = 0.0
+            return
+        }
+        
+        // Resume 후 첫 번째 GPS 업데이트는 거리 계산 건너뛰기
+        // (pause 시점 위치와 resume 후 위치 사이의 거리는 포함하지 않음)
+        if (skipNextDistanceUpdate) {
+            skipNextDistanceUpdate = false
+            // previousLocation을 현재 위치로 업데이트 (거리 계산 없이)
+            previousLocation = Location(location)
+            previousAltitude = currentAltitude
+            lastUpdateTime = locationTime
+            lastMovingUpdateTime = systemElapsed
+            // Grade 기준점도 현재 위치로 재설정
+            gradeBaseLocation = Location(location)
+            gradeBaseAltitude = currentAltitude
+            recentGrades.clear()
+            lastSmoothedGrade = 0.0
+            Log.d(TAG, "[Resume] Skipped first distance update after resume")
             return
         }
         
@@ -1120,7 +1157,8 @@ class LocationService : Service(), SensorEventListener {
         }
         
         val locationText = if (lastLocation != null) {
-            val baseInfo = "Exercise: $exerciseType (K:$kalmanStatus)\n" +
+            val pauseStatus = if (isPaused) " (Paused)" else ""
+            val baseInfo = "Exercise: $exerciseType (K:$kalmanStatus)$pauseStatus\n" +
                     "$sensorStatus\n" +
                     "Distance: ${String.format("%.2f", sessionDistance)}m\n" +
                     "Elevation +: ${String.format("%.1f", sessionElevationGain)}m\n" +
@@ -1345,7 +1383,11 @@ class LocationService : Service(), SensorEventListener {
         } else {
             kalmanAltitude
         }
-        updateElapsedTimeWithMillis(SystemClock.elapsedRealtime())
+        
+        // Pause 중이면 경과 시간 업데이트 안 함
+        if (!isPaused) {
+            updateElapsedTimeWithMillis(SystemClock.elapsedRealtime())
+        }
         
         // ✅ 기압계 데이터 (필수)
         val barometerData = currentPressure?.let { pressure ->
@@ -1429,6 +1471,58 @@ class LocationService : Service(), SensorEventListener {
         updateNotification()
     }
 
+    fun pause() {
+        if (!isForegroundStarted) {
+            Log.w(TAG, "⚠️ Cannot pause: tracking not started")
+            return
+        }
+        
+        if (isPaused) {
+            Log.w(TAG, "⚠️ Already paused")
+            return
+        }
+        
+        isPaused = true
+        pauseStartTime = SystemClock.elapsedRealtime()
+        
+        // Pause 시점의 previousLocation 저장 (resume 시 기준점으로 사용)
+        pausedPreviousLocation = previousLocation?.let { Location(it) }
+        pausedPreviousAltitude = previousAltitude
+        
+        Log.d(TAG, "⏸️ Tracking paused")
+        updateNotification()
+    }
+    
+    fun resume() {
+        if (!isForegroundStarted) {
+            Log.w(TAG, "⚠️ Cannot resume: tracking not started")
+            return
+        }
+        
+        if (!isPaused) {
+            Log.w(TAG, "⚠️ Not paused")
+            return
+        }
+        
+        val resumeTime = SystemClock.elapsedRealtime()
+        
+        // Resume 시점에 lastElapsedUpdateTime을 현재 시간으로 업데이트
+        // 이렇게 하면 pause 기간이 자동으로 제외됨
+        lastElapsedUpdateTime = resumeTime
+        
+        // Resume 후 첫 번째 GPS 업데이트에서 거리 계산을 건너뛰도록 플래그 설정
+        // (pause 시점 위치와 resume 후 위치 사이의 거리는 포함하지 않음)
+        skipNextDistanceUpdate = true
+        
+        isPaused = false
+        pauseStartTime = 0
+        pausedPreviousLocation = null
+        pausedPreviousAltitude = 0.0
+        
+        Log.d(TAG, "▶️ Tracking resumed")
+        updateNotification()
+    }
+    
     fun stopForegroundTracking() {
         Log.d(TAG, "🛑 Stopping GPS tracking")
         
@@ -1450,6 +1544,13 @@ class LocationService : Service(), SensorEventListener {
         lastLocation = null
         isNewLocationAvailable = false
         lastSendTime = 0
+        
+        // Pause 상태 초기화
+        isPaused = false
+        pauseStartTime = 0
+        pausedPreviousLocation = null
+        pausedPreviousAltitude = 0.0
+        skipNextDistanceUpdate = false
         
         if (isForegroundStarted) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -1559,6 +1660,7 @@ class LocationService : Service(), SensorEventListener {
     fun isGyroscopeAvailable(): Boolean = gyroscopeSensor != null
     fun isMagnetometerAvailable(): Boolean = magnetometerSensor != null
     fun isTracking(): Boolean = isForegroundStarted
+    fun isPaused(): Boolean = isPaused
     fun getExerciseType(): String = exerciseType
     fun getUseAccelerometer(): Boolean = useAccelerometer
     fun getUseGyroscope(): Boolean = useGyroscope

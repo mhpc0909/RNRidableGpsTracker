@@ -120,6 +120,7 @@ export interface LocationData {
 
 export interface TrackerStatus {
   isRunning: boolean
+  isPaused?: boolean
   isAuthorized: boolean
   authorizationStatus: string
   isBarometerAvailable: boolean

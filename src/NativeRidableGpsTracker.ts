@@ -22,6 +22,8 @@ export interface Spec extends TurboModule {
 
   start(): Promise<void>
   stop(): Promise<void>
+  pause(): Promise<void>
+  resume(): Promise<void>
 
   getCurrentLocation(): Promise<{
     latitude: number
@@ -89,6 +91,7 @@ export interface Spec extends TurboModule {
 
   checkStatus(): Promise<{
     isRunning: boolean
+    isPaused?: boolean
     isAuthorized: boolean
     authorizationStatus: string
     isBarometerAvailable: boolean

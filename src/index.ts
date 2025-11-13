@@ -54,6 +54,20 @@ export class GpsTracker {
   }
 
   /**
+   * GPS 추적 일시정지 (누적 데이터 업데이트 중단, 위치 트래킹은 지속)
+   */
+  static async pause(): Promise<void> {
+    return RNRidableGpsTracker.pause()
+  }
+
+  /**
+   * GPS 추적 재개 (주행 상태로 복귀)
+   */
+  static async resume(): Promise<void> {
+    return RNRidableGpsTracker.resume()
+  }
+
+  /**
    * 현재 위치 가져오기
    */
   static async getCurrentLocation(): Promise<LocationData> {

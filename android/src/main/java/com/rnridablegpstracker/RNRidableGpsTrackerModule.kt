@@ -227,6 +227,38 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    override fun pause(promise: Promise) {
+        try {
+            if (locationService == null || !serviceBound) {
+                promise.reject("SERVICE_NOT_AVAILABLE", "LocationService is not bound")
+                return
+            }
+
+            locationService?.pause()
+            Log.d(TAG, "⏸️ Tracking paused")
+            promise.resolve(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to pause", e)
+            promise.reject("PAUSE_ERROR", e.message, e)
+        }
+    }
+
+    override fun resume(promise: Promise) {
+        try {
+            if (locationService == null || !serviceBound) {
+                promise.reject("SERVICE_NOT_AVAILABLE", "LocationService is not bound")
+                return
+            }
+
+            locationService?.resume()
+            Log.d(TAG, "▶️ Tracking resumed")
+            promise.resolve(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to resume", e)
+            promise.reject("RESUME_ERROR", e.message, e)
+        }
+    }
+
     override fun getCurrentLocation(promise: Promise) {
         try {
             val service = locationService
@@ -260,6 +292,7 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
         try {
             val status = Arguments.createMap().apply {
                 putBoolean("isRunning", locationService?.isTracking() ?: false)
+                putBoolean("isPaused", locationService?.isPaused() ?: false)
                 putBoolean("isAuthorized", hasLocationPermission())
                 putString("authorizationStatus", getAuthorizationStatus())
                 putBoolean("isBarometerAvailable", locationService?.isBarometerAvailable() ?: false)
