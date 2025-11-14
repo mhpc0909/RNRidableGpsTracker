@@ -168,7 +168,10 @@ class LocationService : Service(), SensorEventListener {
         private const val MAX_MOVEMENT_DISTANCE = 100.0
         private const val MAX_MOVING_TIME_DELTA = 10.0
         private const val GRADE_DISTANCE_THRESHOLD = 5.0
-        private const val GRADE_WINDOW_SIZE = 3
+        private const val GRADE_WINDOW_SIZE = 5
+        private const val GRADE_DISTANCE_PER_SPEED = 2.0  // meters of travel per 1 m/s before recalculating grade
+        private const val GRADE_MIN_SPEED_THRESHOLD = 1.5 // m/s; below this, grade updates are limited
+        private const val GRADE_MAX_DELTA_PER_SAMPLE = 3.0 // % change allowed between samples
         private const val STATIONARY_GRADE_RESET_THRESHOLD = 2
     }
     
@@ -916,8 +919,10 @@ class LocationService : Service(), SensorEventListener {
         }
         
         val horizontalDistance = baseLocation.distanceTo(location).toDouble()
+        val speed = max(0.0, currentFilteredSpeed)
+        val dynamicThreshold = max(GRADE_DISTANCE_THRESHOLD, speed * GRADE_DISTANCE_PER_SPEED)
         
-        if (horizontalDistance < GRADE_DISTANCE_THRESHOLD) {
+        if (horizontalDistance < dynamicThreshold) {
             val gradeValue = lastSmoothedGrade.toFloat()
             return GradeData(gradeValue, getGradeCategory(gradeValue))
         }
@@ -933,6 +938,13 @@ class LocationService : Service(), SensorEventListener {
         val elevationChange = currentAltitude - gradeBaseAltitude
         var rawGrade = (elevationChange / horizontalDistance) * 100.0
         rawGrade = rawGrade.coerceIn(-30.0, 30.0)
+        
+        if (speed < GRADE_MIN_SPEED_THRESHOLD) {
+            // Limit abrupt changes when rider is moving very slowly
+            val delta = rawGrade - lastSmoothedGrade
+            val limitedDelta = delta.coerceIn(-GRADE_MAX_DELTA_PER_SAMPLE, GRADE_MAX_DELTA_PER_SAMPLE)
+            rawGrade = lastSmoothedGrade + limitedDelta
+        }
         
         recentGrades.add(rawGrade)
         if (recentGrades.size > GRADE_WINDOW_SIZE) {

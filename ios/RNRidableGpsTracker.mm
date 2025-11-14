@@ -12,7 +12,10 @@ static const double kMinimumMovementDistance = 0.5;         // m
 static const double kMaximumMovementDistance = 100.0;       // m
 static const double kMaxMovingTimeDelta = 10.0;             // s
 static const double kGradeDistanceThreshold = 5.0;          // m
-static const NSUInteger kGradeWindowSize = 3;
+static const double kGradeDistancePerSpeed = 2.0;           // m per (m/s)
+static const double kGradeMinSpeedThreshold = 1.5;          // m/s
+static const double kGradeMaxDeltaPerSample = 3.0;          // %
+static const NSUInteger kGradeWindowSize = 5;
 static const NSUInteger kStationaryGradeResetThreshold = 2;
 
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
@@ -489,8 +492,10 @@ RCT_EXPORT_MODULE()
     }
     
     CLLocationDistance horizontalDistance = [baseLocation distanceFromLocation:location];
+    double speed = fmax(0.0, self.currentFilteredSpeed);
+    double dynamicThreshold = fmax(kGradeDistanceThreshold, speed * kGradeDistancePerSpeed);
     
-    if (horizontalDistance < kGradeDistanceThreshold) {
+    if (horizontalDistance < dynamicThreshold) {
         return self.lastSmoothedGrade;
     }
     
@@ -502,6 +507,12 @@ RCT_EXPORT_MODULE()
     double elevationChange = currentAltitude - self.gradeBaseAltitude;
     double rawGrade = (elevationChange / horizontalDistance) * 100.0;
     double clampedGrade = fmax(-30.0, fmin(30.0, rawGrade));
+    
+    if (speed < kGradeMinSpeedThreshold) {
+        double delta = clampedGrade - self.lastSmoothedGrade;
+        double limitedDelta = fmax(-kGradeMaxDeltaPerSample, fmin(kGradeMaxDeltaPerSample, delta));
+        clampedGrade = self.lastSmoothedGrade + limitedDelta;
+    }
     
     [self.recentGrades addObject:@(clampedGrade)];
     if (self.recentGrades.count > kGradeWindowSize) {
