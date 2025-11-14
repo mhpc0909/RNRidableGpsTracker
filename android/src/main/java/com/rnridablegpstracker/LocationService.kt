@@ -538,6 +538,48 @@ class LocationService : Service(), SensorEventListener {
         
         isRecordingNoise = true
         
+        // AudioRecord를 한 번만 생성하고 재사용
+        try {
+            val bufferSize = AudioRecord.getMinBufferSize(
+                8000, // 44100 -> 8000 Hz로 낮춤 (소음 측정에는 충분)
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            
+            if (bufferSize == AudioRecord.ERROR || bufferSize == AudioRecord.ERROR_BAD_VALUE) {
+                Log.e(TAG, "❌ AudioRecord buffer size error")
+                isRecordingNoise = false
+                return
+            }
+            
+            audioRecorder = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                8000, // 낮은 샘플레이트
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+            
+            if (audioRecorder?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "❌ AudioRecord not initialized (권한 문제 가능성)")
+                audioRecorder?.release()
+                audioRecorder = null
+                isRecordingNoise = false
+                return
+            }
+            
+            audioRecorder?.startRecording()
+        } catch (e: SecurityException) {
+            Log.e(TAG, "❌ 마이크 권한 없음 (RECORD_AUDIO 권한 필요)", e)
+            isRecordingNoise = false
+            return
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ AudioRecord 생성 실패", e)
+            isRecordingNoise = false
+            return
+        }
+        
+        // 백그라운드 스레드에서 측정
         val noiseRunnable = object : Runnable {
             override fun run() {
                 if (!isRecordingNoise) return
@@ -549,7 +591,7 @@ class LocationService : Service(), SensorEventListener {
                         lastDecibelTimestamp = System.currentTimeMillis()
                         Log.d(TAG, "🎤 Noise: %.1f dB".format(decibel))
                     } else {
-                        Log.w(TAG, "⚠️ Noise measurement returned 0 (권한 문제 또는 기기 문제)")
+                        Log.w(TAG, "⚠️ Noise measurement returned 0")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ 소음 측정 오류", e)
@@ -561,70 +603,72 @@ class LocationService : Service(), SensorEventListener {
             }
         }
         
-        noiseHandler.post(noiseRunnable)
+        // 백그라운드 스레드에서 실행
+        Thread {
+            noiseHandler.post(noiseRunnable)
+        }.start()
+        
         Log.d(TAG, "🎤 Noise measurement started (1 Hz)")
     }
     
     private fun stopNoiseMeasurement() {
         isRecordingNoise = false
         noiseHandler.removeCallbacksAndMessages(null)
+        
+        // AudioRecord 정리
+        try {
+            audioRecorder?.stop()
+            audioRecorder?.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ AudioRecord 정리 오류", e)
+        }
+        audioRecorder = null
+        
         currentDecibel = 0f
         lastDecibelTimestamp = 0
         Log.d(TAG, "🎤 Noise measurement stopped")
     }
     
     private fun measureNoiseLevel(): Float {
+        val recorder = audioRecorder ?: return 0f
+        
         try {
             val bufferSize = AudioRecord.getMinBufferSize(
-                44100,
+                8000,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
             
             if (bufferSize == AudioRecord.ERROR || bufferSize == AudioRecord.ERROR_BAD_VALUE) {
-                Log.e(TAG, "❌ AudioRecord buffer size error")
                 return 0f
             }
             
-            val audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                44100,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
-            )
-            
-            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "❌ AudioRecord not initialized (권한 문제 가능성)")
-                audioRecord.release()
-                return 0f
-            }
-            
-            val buffer = ShortArray(bufferSize)
-            audioRecord.startRecording()
-            val readSize = audioRecord.read(buffer, 0, bufferSize)
-            audioRecord.stop()
-            audioRecord.release()
+            // 작은 버퍼 사용 (더 빠른 처리)
+            val buffer = ShortArray(bufferSize / 4) // 버퍼 크기 1/4로 감소
+            val readSize = recorder.read(buffer, 0, buffer.size)
             
             if (readSize > 0) {
+                // 최적화된 RMS 계산
                 var sum = 0.0
+                var count = 0
                 for (i in 0 until readSize) {
-                    sum += (buffer[i] * buffer[i]).toDouble()
+                    val value = buffer[i].toDouble()
+                    sum += value * value
+                    count++
                 }
-                val rms = sqrt(sum / readSize)
                 
-                // RMS를 데시벨로 변환
-                val referenceAmplitude = 32767.0
-                val decibel = 20 * log10(rms / referenceAmplitude)
-                
-                // 0~120 dB 범위로 정규화
-                return max(0f, min(120f, (decibel + 120).toFloat()))
+                if (count > 0) {
+                    val rms = sqrt(sum / count)
+                    
+                    // RMS를 데시벨로 변환
+                    val referenceAmplitude = 32767.0
+                    val decibel = 20 * log10(rms / referenceAmplitude)
+                    
+                    // 0~120 dB 범위로 정규화
+                    return max(0f, min(120f, (decibel + 120).toFloat()))
+                }
             }
             
-            Log.w(TAG, "⚠️ AudioRecord read size = $readSize")
-            return 0f
-        } catch (e: SecurityException) {
-            Log.e(TAG, "❌ 마이크 권한 없음 (RECORD_AUDIO 권한 필요)", e)
             return 0f
         } catch (e: Exception) {
             Log.e(TAG, "❌ 소음 측정 실패", e)
@@ -1659,6 +1703,35 @@ class LocationService : Service(), SensorEventListener {
     fun isAccelerometerAvailable(): Boolean = accelerometerSensor != null
     fun isGyroscopeAvailable(): Boolean = gyroscopeSensor != null
     fun isMagnetometerAvailable(): Boolean = magnetometerSensor != null
+    fun isLightAvailable(): Boolean = lightSensor != null
+    fun isNoiseAvailable(): Boolean {
+        // 소음 센서는 마이크 하드웨어와 권한이 필요
+        try {
+            val bufferSize = AudioRecord.getMinBufferSize(
+                44100,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            if (bufferSize == AudioRecord.ERROR || bufferSize == AudioRecord.ERROR_BAD_VALUE) {
+                return false
+            }
+            // 실제 초기화는 시도하지 않고 버퍼 크기만 확인
+            return true
+        } catch (e: Exception) {
+            return false
+        }
+    }
+    
+    fun getAvailableSensors(): Map<String, Boolean> {
+        return mapOf(
+            "accelerometer" to isAccelerometerAvailable(),
+            "gyroscope" to isGyroscopeAvailable(),
+            "magnetometer" to isMagnetometerAvailable(),
+            "light" to isLightAvailable(),
+            "noise" to isNoiseAvailable()
+        )
+    }
+    
     fun isTracking(): Boolean = isForegroundStarted
     fun isPaused(): Boolean = isPaused
     fun getExerciseType(): String = exerciseType

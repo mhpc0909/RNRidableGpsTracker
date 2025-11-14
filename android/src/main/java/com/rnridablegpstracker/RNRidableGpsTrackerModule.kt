@@ -318,6 +318,29 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    override fun getAvailableSensors(promise: Promise) {
+        try {
+            val service = locationService
+            if (service == null || !serviceBound) {
+                promise.reject("SERVICE_NOT_AVAILABLE", "LocationService is not bound")
+                return
+            }
+
+            val sensors = service.getAvailableSensors()
+            val result = Arguments.createMap().apply {
+                putBoolean("accelerometer", sensors["accelerometer"] ?: false)
+                putBoolean("gyroscope", sensors["gyroscope"] ?: false)
+                putBoolean("magnetometer", sensors["magnetometer"] ?: false)
+                putBoolean("light", sensors["light"] ?: false)
+                putBoolean("noise", sensors["noise"] ?: false)
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get available sensors", e)
+            promise.reject("GET_SENSORS_ERROR", e.message, e)
+        }
+    }
+
     override fun requestPermissions(promise: Promise) {
         promise.resolve(hasLocationPermission())
     }

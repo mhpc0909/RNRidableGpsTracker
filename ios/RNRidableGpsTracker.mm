@@ -90,6 +90,8 @@ static const NSUInteger kStationaryGradeResetThreshold = 2;
 @property (nonatomic, assign) double currentDecibel;
 @property (nonatomic, assign) NSTimeInterval lastDecibelTimestamp;
 @property (nonatomic, strong) NSTimer *noiseTimer;
+@property (nonatomic, strong) AVAudioRecorder *noiseRecorder;
+@property (nonatomic, strong) AVAudioSession *audioSession;
 
 @property (nonatomic, assign) NSInteger maxBufferSize;
 
@@ -910,6 +912,44 @@ RCT_EXPORT_METHOD(checkStatus:(RCTPromiseResolveBlock)resolve
     resolve(result);
 }
 
+RCT_EXPORT_METHOD(getAvailableSensors:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    // 가속계
+    BOOL accelerometerAvailable = self.motionManager.isAccelerometerAvailable;
+    
+    // 자이로스코프
+    BOOL gyroscopeAvailable = self.motionManager.isGyroAvailable;
+    
+    // 자기장 센서
+    BOOL magnetometerAvailable = self.motionManager.isMagnetometerAvailable;
+    
+    // 조도 센서 (iOS는 UIScreen brightness 사용, 항상 사용 가능)
+    BOOL lightAvailable = YES;
+    
+    // 소음 센서 (AVAudioSession 사용, 권한 필요)
+    BOOL noiseAvailable = NO;
+    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+    AVAudioSessionRecordPermission permission = [audioSession recordPermission];
+    if (permission == AVAudioSessionRecordPermissionGranted) {
+        // 권한이 있으면 하드웨어 가용성 확인
+        noiseAvailable = YES;  // iOS에서는 권한이 있으면 일반적으로 사용 가능
+    } else if (permission == AVAudioSessionRecordPermissionUndetermined) {
+        // 권한이 결정되지 않았으면 하드웨어는 사용 가능할 수 있음
+        noiseAvailable = YES;
+    }
+    
+    NSDictionary *result = @{
+        @"accelerometer": @(accelerometerAvailable),
+        @"gyroscope": @(gyroscopeAvailable),
+        @"magnetometer": @(magnetometerAvailable),
+        @"light": @(lightAvailable),
+        @"noise": @(noiseAvailable)
+    };
+    
+    resolve(result);
+}
+
 RCT_EXPORT_METHOD(requestPermissions:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
@@ -1643,6 +1683,50 @@ RCT_EXPORT_METHOD(openLocationSettings)
         [self.noiseTimer invalidate];
     }
     
+    // AudioSession을 한 번만 설정
+    if (!self.audioSession) {
+        self.audioSession = [AVAudioSession sharedInstance];
+        NSError *error = nil;
+        [self.audioSession setCategory:AVAudioSessionCategoryRecord 
+                           withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                 error:&error];
+        if (error) {
+            RCTLogError(@"Audio session error: %@", error);
+            return;
+        }
+        [self.audioSession setActive:YES error:&error];
+        if (error) {
+            RCTLogError(@"Audio session activate error: %@", error);
+            return;
+        }
+    }
+    
+    // AVAudioRecorder를 한 번만 생성하고 재사용
+    if (!self.noiseRecorder) {
+        NSDictionary *settings = @{
+            AVFormatIDKey: @(kAudioFormatLinearPCM), // 더 가벼운 포맷
+            AVSampleRateKey: @8000.0, // 44100 -> 8000 Hz
+            AVNumberOfChannelsKey: @1,
+            AVLinearPCMBitDepthKey: @16,
+            AVLinearPCMIsBigEndianKey: @NO,
+            AVLinearPCMIsFloatKey: @NO
+        };
+        
+        NSURL *url = [NSURL fileURLWithPath:@"/dev/null"];
+        NSError *error = nil;
+        self.noiseRecorder = [[AVAudioRecorder alloc] initWithURL:url 
+                                                          settings:settings 
+                                                             error:&error];
+        
+        if (error || !self.noiseRecorder) {
+            RCTLogError(@"Audio recorder error: %@", error);
+            return;
+        }
+        
+        [self.noiseRecorder prepareToRecord];
+        self.noiseRecorder.meteringEnabled = YES;
+    }
+    
     self.noiseTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                        target:self
                                                      selector:@selector(measureNoiseLevel)
@@ -1659,6 +1743,18 @@ RCT_EXPORT_METHOD(openLocationSettings)
         self.noiseTimer = nil;
     }
     
+    // Recorder 정리
+    if (self.noiseRecorder) {
+        [self.noiseRecorder stop];
+        self.noiseRecorder = nil;
+    }
+    
+    // AudioSession 비활성화
+    if (self.audioSession) {
+        [self.audioSession setActive:NO error:nil];
+        self.audioSession = nil;
+    }
+    
     self.currentDecibel = 0.0;
     self.lastDecibelTimestamp = 0;
     RCTLogInfo(@"🎤 Noise measurement stopped");
@@ -1666,56 +1762,37 @@ RCT_EXPORT_METHOD(openLocationSettings)
 
 - (void)measureNoiseLevel
 {
-    // AVAudioRecorder를 사용한 소음 측정
-    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
-    NSError *error = nil;
-    
-    [audioSession setCategory:AVAudioSessionCategoryRecord error:&error];
-    if (error) {
-        RCTLogError(@"Audio session error: %@", error);
-        return;
-    }
-    
-    [audioSession setActive:YES error:&error];
-    if (error) {
-        RCTLogError(@"Audio session activate error: %@", error);
-        return;
-    }
-    
-    // 임시 녹음 설정
-    NSDictionary *settings = @{
-        AVFormatIDKey: @(kAudioFormatAppleLossless),
-        AVSampleRateKey: @44100.0,
-        AVNumberOfChannelsKey: @1,
-        AVEncoderAudioQualityKey: @(AVAudioQualityMin)
-    };
-    
-    NSURL *url = [NSURL fileURLWithPath:@"/dev/null"];
-    AVAudioRecorder *recorder = [[AVAudioRecorder alloc] initWithURL:url settings:settings error:&error];
-    
-    if (error || !recorder) {
-        RCTLogError(@"Audio recorder error: %@", error);
-        return;
-    }
-    
-    [recorder prepareToRecord];
-    recorder.meteringEnabled = YES;
-    [recorder record];
-    
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [recorder updateMeters];
+    // 백그라운드 스레드에서 실행
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        if (!self.noiseRecorder || !self.audioSession) {
+            return;
+        }
+        
+        // 이미 녹음 중이면 재시작
+        if (self.noiseRecorder.isRecording) {
+            [self.noiseRecorder stop];
+        }
+        
+        [self.noiseRecorder record];
+        
+        // 짧은 대기 시간 (0.05초로 단축)
+        usleep(50000); // 0.05초
+        
+        [self.noiseRecorder updateMeters];
         
         // averagePowerForChannel: -160 ~ 0 dB 범위
-        float averagePower = [recorder averagePowerForChannel:0];
+        float averagePower = [self.noiseRecorder averagePowerForChannel:0];
         
         // -160 ~ 0 범위를 0 ~ 120 dB로 변환
         float decibel = MAX(0, MIN(120, averagePower + 120));
         
-        self.currentDecibel = decibel;
-        self.lastDecibelTimestamp = [[NSDate date] timeIntervalSince1970];
+        // 메인 스레드에서 값 업데이트
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.currentDecibel = decibel;
+            self.lastDecibelTimestamp = [[NSDate date] timeIntervalSince1970];
+        });
         
-        [recorder stop];
-        [audioSession setActive:NO error:nil];
+        [self.noiseRecorder stop];
     });
 }
 

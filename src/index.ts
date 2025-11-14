@@ -82,6 +82,19 @@ export class GpsTracker {
   }
 
   /**
+   * 사용 가능한 센서 리스트 확인
+   */
+  static async getAvailableSensors(): Promise<{
+    accelerometer: boolean
+    gyroscope: boolean
+    magnetometer: boolean
+    light: boolean
+    noise: boolean
+  }> {
+    return RNRidableGpsTracker.getAvailableSensors()
+  }
+
+  /**
    * 권한 요청
    */
   static async requestPermissions(): Promise<boolean> {

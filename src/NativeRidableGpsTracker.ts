@@ -110,6 +110,14 @@ export interface Spec extends TurboModule {
     useKalmanFilter?: boolean
   }>
 
+  getAvailableSensors(): Promise<{
+    accelerometer: boolean
+    gyroscope: boolean
+    magnetometer: boolean
+    light: boolean
+    noise: boolean
+  }>
+
   requestPermissions(): Promise<boolean>
   openLocationSettings(): void
 
