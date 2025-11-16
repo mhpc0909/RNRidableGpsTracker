@@ -1694,17 +1694,27 @@ RCT_EXPORT_METHOD(openLocationSettings)
         [self.noiseTimer invalidate];
     }
     
-    // AudioSession을 한 번만 설정
+    // AudioSession을 한 번만 설정 (PlayAndRecord + MixWithOthers)
     if (!self.audioSession) {
         self.audioSession = [AVAudioSession sharedInstance];
         NSError *error = nil;
-        [self.audioSession setCategory:AVAudioSessionCategoryRecord 
-                           withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+
+        // 같은 앱 내 오디오 재생을 유지하고, 마이크 + 스피커 동시 사용
+        [self.audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                           withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker
                                  error:&error];
         if (error) {
             RCTLogError(@"Audio session error: %@", error);
             return;
         }
+
+        // 소음 측정에 적합한 모드 (원치 않으면 생략 가능)
+        [self.audioSession setMode:AVAudioSessionModeMeasurement error:&error];
+        if (error) {
+            RCTLogError(@"Audio session mode error: %@", error);
+            return;
+        }
+
         [self.audioSession setActive:YES error:&error];
         if (error) {
             RCTLogError(@"Audio session activate error: %@", error);
