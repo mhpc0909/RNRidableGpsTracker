@@ -12,10 +12,12 @@ static const double kMinimumMovementDistance = 0.5;         // m
 static const double kMaximumMovementDistance = 100.0;       // m
 static const double kMaxMovingTimeDelta = 10.0;             // s
 static const double kGradeDistanceThreshold = 5.0;          // m
-static const double kGradeDistancePerSpeed = 2.0;           // m per (m/s)
+static const double kGradeDistancePerSpeed = 1.0;           // m per (m/s)
 static const double kGradeMinSpeedThreshold = 1.5;          // m/s
-static const double kGradeMaxDeltaPerSample = 3.0;          // %
-static const NSUInteger kGradeWindowSize = 5;
+static const double kGradeMaxDeltaSlow = 3.0;               // % (very slow)
+static const double kGradeMaxDeltaMedium = 6.0;             // % (medium speed)
+static const double kGradeMaxDeltaFast = 10.0;              // % (high speed)
+static const NSUInteger kGradeWindowSize = 3;
 static const NSUInteger kStationaryGradeResetThreshold = 2;
 
 @interface RNRidableGpsTracker () <CLLocationManagerDelegate>
@@ -508,11 +510,19 @@ RCT_EXPORT_MODULE()
     double rawGrade = (elevationChange / horizontalDistance) * 100.0;
     double clampedGrade = fmax(-30.0, fmin(30.0, rawGrade));
     
+    // 속도에 따라 허용하는 경사 변화량을 다르게 설정
+    double delta = clampedGrade - self.lastSmoothedGrade;
+    double maxDelta;
     if (speed < kGradeMinSpeedThreshold) {
-        double delta = clampedGrade - self.lastSmoothedGrade;
-        double limitedDelta = fmax(-kGradeMaxDeltaPerSample, fmin(kGradeMaxDeltaPerSample, delta));
-        clampedGrade = self.lastSmoothedGrade + limitedDelta;
+        maxDelta = kGradeMaxDeltaSlow;
+    } else if (speed < 5.0) {
+        maxDelta = kGradeMaxDeltaMedium;
+    } else {
+        maxDelta = kGradeMaxDeltaFast;
     }
+    
+    double limitedDelta = fmax(-maxDelta, fmin(maxDelta, delta));
+    clampedGrade = self.lastSmoothedGrade + limitedDelta;
     
     [self.recentGrades addObject:@(clampedGrade)];
     if (self.recentGrades.count > kGradeWindowSize) {

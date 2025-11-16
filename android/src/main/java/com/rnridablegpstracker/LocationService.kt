@@ -168,10 +168,12 @@ class LocationService : Service(), SensorEventListener {
         private const val MAX_MOVEMENT_DISTANCE = 100.0
         private const val MAX_MOVING_TIME_DELTA = 10.0
         private const val GRADE_DISTANCE_THRESHOLD = 5.0
-        private const val GRADE_WINDOW_SIZE = 5
-        private const val GRADE_DISTANCE_PER_SPEED = 2.0  // meters of travel per 1 m/s before recalculating grade
+        private const val GRADE_WINDOW_SIZE = 3
+        private const val GRADE_DISTANCE_PER_SPEED = 1.0  // meters of travel per 1 m/s before recalculating grade
         private const val GRADE_MIN_SPEED_THRESHOLD = 1.5 // m/s; below this, grade updates are limited
-        private const val GRADE_MAX_DELTA_PER_SAMPLE = 3.0 // % change allowed between samples
+        private const val GRADE_MAX_DELTA_SLOW = 3.0  // % change allowed when very slow
+        private const val GRADE_MAX_DELTA_MEDIUM = 6.0 // % change allowed at medium speed
+        private const val GRADE_MAX_DELTA_FAST = 10.0 // % change allowed at higher speed
         private const val STATIONARY_GRADE_RESET_THRESHOLD = 2
     }
     
@@ -939,12 +941,15 @@ class LocationService : Service(), SensorEventListener {
         var rawGrade = (elevationChange / horizontalDistance) * 100.0
         rawGrade = rawGrade.coerceIn(-30.0, 30.0)
         
-        if (speed < GRADE_MIN_SPEED_THRESHOLD) {
-            // Limit abrupt changes when rider is moving very slowly
-            val delta = rawGrade - lastSmoothedGrade
-            val limitedDelta = delta.coerceIn(-GRADE_MAX_DELTA_PER_SAMPLE, GRADE_MAX_DELTA_PER_SAMPLE)
-            rawGrade = lastSmoothedGrade + limitedDelta
+        // 속도에 따라 허용하는 경사 변화량을 다르게 설정
+        val delta = rawGrade - lastSmoothedGrade
+        val maxDelta = when {
+            speed < GRADE_MIN_SPEED_THRESHOLD -> GRADE_MAX_DELTA_SLOW
+            speed < 5.0 -> GRADE_MAX_DELTA_MEDIUM
+            else -> GRADE_MAX_DELTA_FAST
         }
+        val limitedDelta = delta.coerceIn(-maxDelta, maxDelta)
+        rawGrade = lastSmoothedGrade + limitedDelta
         
         recentGrades.add(rawGrade)
         if (recentGrades.size > GRADE_WINDOW_SIZE) {
