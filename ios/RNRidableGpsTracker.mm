@@ -469,8 +469,10 @@ RCT_EXPORT_MODULE()
     double elevationChange = currentAltitude - self.previousAltitude;
     
     // ✅ 거리 조건 제거: 상승/하강은 실제 고도 변화를 반영해야 함
-    // ✅ 임계값을 0.1m로 낮춤 (Kalman 필터로 부드러워진 고도 변화도 감지)
-    if (fabs(elevationChange) > 0.1) {
+    // ✅ 임계값 0.5m: GPS 노이즈 필터링 (일반적인 권장값)
+    // ⚠️ 주의: Kalman 필터로 부드러워진 고도는 변화가 0.5m 미만일 수 있음
+    //    만약 누적 상승이 0이면 임계값을 0.3m로 낮추거나, rawEnhancedAltitude 사용 고려
+    if (fabs(elevationChange) > 0.5) {
         if (elevationChange > 0) {
             self.sessionElevationGain += elevationChange;
             RCTLogInfo(@"[Elevation] Gain: +%.2fm (current: %.2f, previous: %.2f)", elevationChange, currentAltitude, self.previousAltitude);
@@ -478,6 +480,9 @@ RCT_EXPORT_MODULE()
             self.sessionElevationLoss += fabs(elevationChange);
             RCTLogInfo(@"[Elevation] Loss: -%.2fm (current: %.2f, previous: %.2f)", fabs(elevationChange), currentAltitude, self.previousAltitude);
         }
+    } else if (fabs(elevationChange) > 0.1) {
+        // 디버깅: 0.1m~0.5m 사이의 변화가 있는지 확인
+        RCTLogInfo(@"[Elevation] Small change ignored: %.2fm (threshold: 0.5m)", elevationChange);
     }
     
     if (self.currentFilteredSpeed > self.sessionMaxSpeed) {
@@ -1719,8 +1724,11 @@ RCT_EXPORT_METHOD(openLocationSettings)
         NSError *error = nil;
 
         // 같은 앱 내 오디오 재생을 유지하고, 마이크 + 스피커 동시 사용
+        // ✅ 블루투스 오디오 허용 (헤드셋/이어폰 + 스피커 모두 지원)
         [self.audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
-                           withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker
+                           withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                    | AVAudioSessionCategoryOptionAllowBluetooth
+                                    | AVAudioSessionCategoryOptionAllowBluetoothA2DP
                                  error:&error];
         if (error) {
             RCTLogError(@"Audio session error: %@", error);
