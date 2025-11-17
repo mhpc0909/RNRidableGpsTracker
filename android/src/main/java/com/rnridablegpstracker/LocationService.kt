@@ -97,7 +97,7 @@ class LocationService : Service(), SensorEventListener {
     private var kalmanAltitude: Double = 0.0
     private var altitudeVariance: Double = 0.0
     private var isAltitudeKalmanInitialized = false
-    private var altitudeProcessNoise: Double = 0.5
+    private var altitudeProcessNoise: Double = 3.0
     
     // 운동 타입별 필터 파라미터
     private var processNoise: Double = 0.0
@@ -874,11 +874,15 @@ class LocationService : Service(), SensorEventListener {
         
         val elevationChange = currentAltitude - previousAltitude
         
-        if (distanceWithinBounds && abs(elevationChange) > 0.5) {
+        // ✅ 거리 조건 제거: 상승/하강은 실제 고도 변화를 반영해야 함
+        // ✅ 임계값을 0.1m로 낮춤 (Kalman 필터로 부드러워진 고도 변화도 감지)
+        if (abs(elevationChange) > 0.1) {
             if (elevationChange > 0) {
                 sessionElevationGain += elevationChange
+                Log.d(TAG, "[Elevation] Gain: +${String.format("%.2f", elevationChange)}m (current: ${String.format("%.2f", currentAltitude)}, previous: ${String.format("%.2f", previousAltitude)})")
             } else {
                 sessionElevationLoss += abs(elevationChange)
+                Log.d(TAG, "[Elevation] Loss: -${String.format("%.2f", abs(elevationChange))}m (current: ${String.format("%.2f", currentAltitude)}, previous: ${String.format("%.2f", previousAltitude)})")
             }
         }
         
@@ -1281,7 +1285,7 @@ class LocationService : Service(), SensorEventListener {
             "running" -> {
                 this.priority = Priority.PRIORITY_HIGH_ACCURACY
                 this.useKalmanFilter = true
-                this.processNoise = 0.5
+                this.processNoise = 7.0
                 Log.d(TAG, "🏃 Running mode: Kalman=$useKalmanFilter, Sensors=[A:$useAccelerometer G:$useGyroscope M:$useMagnetometer L:$useLight N:$useNoise]")
             }
             "hiking" -> {
@@ -1293,7 +1297,7 @@ class LocationService : Service(), SensorEventListener {
             "walking" -> {
                 this.priority = Priority.PRIORITY_HIGH_ACCURACY
                 this.useKalmanFilter = true
-                this.processNoise = 2.0
+                this.processNoise = 1.0
                 Log.d(TAG, "🚶 Walking mode: Kalman=$useKalmanFilter, Sensors=[A:$useAccelerometer G:$useGyroscope M:$useMagnetometer L:$useLight N:$useNoise]")
             }
         }

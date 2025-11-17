@@ -162,7 +162,7 @@ RCT_EXPORT_MODULE()
         _variance = 0.0;
         _processNoise = 0.0;
         _altitudeVariance = 0.0;
-        _altitudeProcessNoise = 0.5;
+        _altitudeProcessNoise = 3.0;
         _maxBufferSize = 10;
         _accelerometerBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
         _gyroscopeBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
@@ -468,11 +468,15 @@ RCT_EXPORT_MODULE()
     
     double elevationChange = currentAltitude - self.previousAltitude;
     
-    if (distanceWithinBounds && fabs(elevationChange) > 0.5) {
+    // ✅ 거리 조건 제거: 상승/하강은 실제 고도 변화를 반영해야 함
+    // ✅ 임계값을 0.1m로 낮춤 (Kalman 필터로 부드러워진 고도 변화도 감지)
+    if (fabs(elevationChange) > 0.1) {
         if (elevationChange > 0) {
             self.sessionElevationGain += elevationChange;
+            RCTLogInfo(@"[Elevation] Gain: +%.2fm (current: %.2f, previous: %.2f)", elevationChange, currentAltitude, self.previousAltitude);
         } else {
             self.sessionElevationLoss += fabs(elevationChange);
+            RCTLogInfo(@"[Elevation] Loss: -%.2fm (current: %.2f, previous: %.2f)", fabs(elevationChange), currentAltitude, self.previousAltitude);
         }
     }
     
@@ -680,7 +684,8 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
         } else if ([exerciseType isEqualToString:@"running"]) {
             self.locationManager.activityType = CLActivityTypeOtherNavigation;
             self.useKalmanFilter = YES;
-            self.processNoise = 0.5;
+            // ✅ 러닝에서 Kalman 필터 완화 (더 빠르게 커브에 반응하도록 노이즈 증가)
+            self.processNoise = 7.0;
             
         } else if ([exerciseType isEqualToString:@"hiking"]) {
             self.locationManager.activityType = CLActivityTypeOtherNavigation;
@@ -690,7 +695,7 @@ RCT_EXPORT_METHOD(configure:(NSDictionary *)config
         } else if ([exerciseType isEqualToString:@"walking"]) {
             self.locationManager.activityType = CLActivityTypeOtherNavigation;
             self.useKalmanFilter = YES;
-            self.processNoise = 2.0;
+            self.processNoise = 1.0;
         }
     } else {
         self.exerciseType = @"bicycle";
@@ -1501,6 +1506,9 @@ RCT_EXPORT_METHOD(openLocationSettings)
                        currentAltitude:(double)currentAltitude
                     includeSensorData:(BOOL)includeSensorData
 {
+    // ✅ 운동 타입 / Kalman 필터와 관계없이, speed는 항상 원본 GPS speed(m/s) 기반으로 전송
+    double rawSpeed = (location.speed >= 0) ? location.speed : 0.0;
+
     // Pause 중이면 경과 시간 업데이트 안 함
     if (!self.isPaused) {
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -1512,7 +1520,8 @@ RCT_EXPORT_METHOD(openLocationSettings)
         @"longitude": @(location.coordinate.longitude),
         @"altitude": @(location.altitude),
         @"accuracy": @(location.horizontalAccuracy),
-        @"speed": @(self.currentFilteredSpeed > 0 ? self.currentFilteredSpeed : (location.speed >= 0 ? location.speed : 0)),
+        // ✅ Android와 동일하게, 항상 원본 GPS speed(m/s)를 사용
+        @"speed": @(rawSpeed),
         @"bearing": @(location.course >= 0 ? location.course : 0),
         @"timestamp": @([location.timestamp timeIntervalSince1970] * 1000),
         @"isNewLocation": @(isNew),

@@ -406,14 +406,17 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
             putDouble("longitude", location.longitude)
             putDouble("altitude", location.altitude)
             putDouble("accuracy", location.accuracy.toDouble())
-            val service = locationService
-            val filteredSpeed = service?.getFilteredSpeed() ?: if (location.hasSpeed()) location.speed.toDouble() else 0.0
-            putDouble("speed", filteredSpeed)
+
+            // ✅ 운동 타입/칼만 필터와 무관하게, 항상 원본 GPS speed(m/s)를 그대로 전송
+            val rawSpeed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
+            putDouble("speed", rawSpeed)
             putDouble("bearing", if (location.hasBearing()) location.bearing.toDouble() else 0.0)
             putDouble("timestamp", location.time.toDouble())
             putBoolean("isNewLocation", isNew)
             putBoolean("isKalmanFiltered", locationService?.isKalmanFiltered() ?: false)
-            
+
+            // ✅ LocationService에서 보관 중인 Raw 위치 (없으면 현재 값 사용)
+            val service = locationService
             val rawLatitude = service?.getLastRawLatitude() ?: location.latitude
             val rawLongitude = service?.getLastRawLongitude() ?: location.longitude
             putDouble("rawLatitude", rawLatitude)
@@ -499,9 +502,10 @@ class RNRidableGpsTrackerModule(reactContext: ReactApplicationContext) :
                     }
                 }
             }
-            
-            // 이동 상태
-            val isMoving = service?.isMoving() ?: (filteredSpeed >= 0.5)
+
+            // 이동 상태: 서비스 플래그가 있으면 우선 사용, 없으면 원본 GPS 속도로 판단
+            val fallbackSpeed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
+            val isMoving = service?.isMoving() ?: (fallbackSpeed >= 0.5)
             putBoolean("isMoving", isMoving)
         }
     }
