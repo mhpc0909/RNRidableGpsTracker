@@ -130,6 +130,10 @@ class LocationService : Service(), SensorEventListener {
     private var gradeBaseAltitude: Double = 0.0
     private val recentGrades = mutableListOf<Double>()
     private var lastSmoothedGrade: Double = 0.0
+    
+    // 경사각 기준점 (변화량 계산용)
+    private var basePitchAngle: Double = 0.0
+    private var isPitchAngleInitialized: Boolean = false
     private var stationaryGradeCounter: Int = 0
     private var lastRawLatitude: Double? = null
     private var lastRawLongitude: Double? = null
@@ -755,6 +759,8 @@ class LocationService : Service(), SensorEventListener {
         lastUpdateTime = 0
         isCurrentlyMoving = false
         currentFilteredSpeed = 0.0
+        basePitchAngle = 0.0
+        isPitchAngleInitialized = false
         lastRawLatitude = null
         lastRawLongitude = null
         lastRawAltitude = null
@@ -1148,14 +1154,32 @@ class LocationService : Service(), SensorEventListener {
         val avgY = accelerometerBuffer.map { it.y }.average().toFloat()
         val avgZ = accelerometerBuffer.map { it.z }.average().toFloat()
         
-        val pitchAngle = Math.toDegrees(
+        val currentPitchAngle = Math.toDegrees(
             kotlin.math.atan2(avgY.toDouble(), avgZ.toDouble())
-        ).toFloat()
+        ).toDouble()
         
-        val isClimbing = pitchAngle > 5f
-        val isDescending = pitchAngle < -5f
+        // ✅ 변화량 기반 계산: 기준점 대비 변화량으로 isClimbing/isDescending 판단
+        if (!isPitchAngleInitialized) {
+            // 첫 번째 측정값을 기준점으로 설정
+            basePitchAngle = currentPitchAngle
+            isPitchAngleInitialized = true
+            return Triple(currentPitchAngle.toFloat(), false, false)
+        }
         
-        return Triple(pitchAngle, isClimbing, isDescending)
+        // 기준점 대비 변화량 계산
+        val pitchChange = currentPitchAngle - basePitchAngle
+        
+        // ✅ 변화량이 3도 이상일 때만 isClimbing/isDescending 판단 (절대값이 아닌 변화량 기준)
+        val isClimbing = pitchChange > 3.0
+        val isDescending = pitchChange < -3.0
+        
+        // 기준점 업데이트 (이동 중일 때만, 부드럽게)
+        if (isCurrentlyMoving) {
+            // 기준점을 현재 값으로 점진적으로 업데이트 (드리프트 방지)
+            basePitchAngle = basePitchAngle * 0.95 + currentPitchAngle * 0.05
+        }
+        
+        return Triple(currentPitchAngle.toFloat(), isClimbing, isDescending)
     }
 
     private fun initKalmanFilter(location: Location) {

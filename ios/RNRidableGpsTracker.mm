@@ -125,6 +125,10 @@ static const NSUInteger kStationaryGradeResetThreshold = 2;
 @property (nonatomic, assign) double lastRawAltitude;
 @property (nonatomic, assign) BOOL hasLastRawLocation;
 
+// 경사각 기준점 (변화량 계산용)
+@property (nonatomic, assign) double basePitchAngle;
+@property (nonatomic, assign) BOOL isPitchAngleInitialized;
+
 // Pause 관련 상태
 @property (nonatomic, assign) BOOL isPaused;
 @property (nonatomic, assign) NSTimeInterval pauseStartTime;
@@ -197,6 +201,8 @@ RCT_EXPORT_MODULE()
         _lastRawLongitude = 0.0;
         _lastRawAltitude = 0.0;
         _hasLastRawLocation = NO;
+        _basePitchAngle = 0.0;
+        _isPitchAngleInitialized = NO;
         
         // Pause 상태 초기화
         _isPaused = NO;
@@ -374,6 +380,8 @@ RCT_EXPORT_MODULE()
     self.currentFilteredSpeed = 0.0;
     [self resetGradeTrackingWithLocation:nil currentAltitude:0.0];
     self.stationaryGradeCounter = 0;
+    self.basePitchAngle = 0.0;
+    self.isPitchAngleInitialized = NO;
     self.hasLastRawLocation = NO;
     self.lastRawLatitude = 0.0;
     self.lastRawLongitude = 0.0;
@@ -1300,14 +1308,36 @@ RCT_EXPORT_METHOD(openLocationSettings)
     double avgY = sumY / self.accelerometerBuffer.count;
     double avgZ = sumZ / self.accelerometerBuffer.count;
     
-    double pitchAngle = atan2(avgY, sqrt(avgX * avgX + avgZ * avgZ)) * 180.0 / M_PI;
-    pitchAngle = fmax(-90.0, fmin(90.0, pitchAngle));
+    double currentPitchAngle = atan2(avgY, sqrt(avgX * avgX + avgZ * avgZ)) * 180.0 / M_PI;
+    currentPitchAngle = fmax(-90.0, fmin(90.0, currentPitchAngle));
     
-    BOOL isClimbing = pitchAngle > 5.0;
-    BOOL isDescending = pitchAngle < -5.0;
+    // ✅ 변화량 기반 계산: 기준점 대비 변화량으로 isClimbing/isDescending 판단
+    if (!self.isPitchAngleInitialized) {
+        // 첫 번째 측정값을 기준점으로 설정
+        self.basePitchAngle = currentPitchAngle;
+        self.isPitchAngleInitialized = YES;
+        return @{
+            @"angle": @(currentPitchAngle),
+            @"isClimbing": @NO,
+            @"isDescending": @NO
+        };
+    }
+    
+    // 기준점 대비 변화량 계산
+    double pitchChange = currentPitchAngle - self.basePitchAngle;
+    
+    // ✅ 변화량이 3도 이상일 때만 isClimbing/isDescending 판단 (절대값이 아닌 변화량 기준)
+    BOOL isClimbing = pitchChange > 3.0;
+    BOOL isDescending = pitchChange < -3.0;
+    
+    // 기준점 업데이트 (이동 중일 때만, 부드럽게)
+    if (self.isCurrentlyMoving) {
+        // 기준점을 현재 값으로 점진적으로 업데이트 (드리프트 방지)
+        self.basePitchAngle = self.basePitchAngle * 0.95 + currentPitchAngle * 0.05;
+    }
     
     return @{
-        @"angle": @(pitchAngle),
+        @"angle": @(currentPitchAngle),
         @"isClimbing": @(isClimbing),
         @"isDescending": @(isDescending)
     };
