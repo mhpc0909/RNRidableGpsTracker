@@ -886,8 +886,9 @@ class LocationService : Service(), SensorEventListener {
             }
         }
         
-        if (currentFilteredSpeed > sessionMaxSpeed) {
-            sessionMaxSpeed = currentFilteredSpeed.toFloat()
+        // ✅ sessionMaxSpeed는 speed와 동일하게 원본 GPS speed 사용 (필터 없이)
+        if (rawSpeed > sessionMaxSpeed) {
+            sessionMaxSpeed = rawSpeed.toFloat()
         }
         
         previousLocation = location

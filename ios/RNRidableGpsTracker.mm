@@ -485,8 +485,10 @@ RCT_EXPORT_MODULE()
         RCTLogInfo(@"[Elevation] Small change ignored: %.2fm (threshold: 0.5m)", elevationChange);
     }
     
-    if (self.currentFilteredSpeed > self.sessionMaxSpeed) {
-        self.sessionMaxSpeed = self.currentFilteredSpeed;
+    // ✅ sessionMaxSpeed는 speed와 동일하게 원본 GPS speed 사용 (필터 없이)
+    double rawSpeed = (location.speed >= 0) ? location.speed : 0.0;
+    if (rawSpeed > self.sessionMaxSpeed) {
+        self.sessionMaxSpeed = rawSpeed;
     }
     
     self.previousLocation = location;
