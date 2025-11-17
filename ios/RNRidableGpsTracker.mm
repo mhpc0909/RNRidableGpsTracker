@@ -469,10 +469,8 @@ RCT_EXPORT_MODULE()
     double elevationChange = currentAltitude - self.previousAltitude;
     
     // ✅ 거리 조건 제거: 상승/하강은 실제 고도 변화를 반영해야 함
-    // ✅ 임계값 0.5m: GPS 노이즈 필터링 (일반적인 권장값)
-    // ⚠️ 주의: Kalman 필터로 부드러워진 고도는 변화가 0.5m 미만일 수 있음
-    //    만약 누적 상승이 0이면 임계값을 0.3m로 낮추거나, rawEnhancedAltitude 사용 고려
-    if (fabs(elevationChange) > 0.5) {
+    // ✅ 임계값 0.1m: Kalman 필터로 부드러워진 고도 변화도 감지 (Android와 동일)
+    if (fabs(elevationChange) > 0.1) {
         if (elevationChange > 0) {
             self.sessionElevationGain += elevationChange;
             RCTLogInfo(@"[Elevation] Gain: +%.2fm (current: %.2f, previous: %.2f)", elevationChange, currentAltitude, self.previousAltitude);
@@ -480,9 +478,6 @@ RCT_EXPORT_MODULE()
             self.sessionElevationLoss += fabs(elevationChange);
             RCTLogInfo(@"[Elevation] Loss: -%.2fm (current: %.2f, previous: %.2f)", fabs(elevationChange), currentAltitude, self.previousAltitude);
         }
-    } else if (fabs(elevationChange) > 0.1) {
-        // 디버깅: 0.1m~0.5m 사이의 변화가 있는지 확인
-        RCTLogInfo(@"[Elevation] Small change ignored: %.2fm (threshold: 0.5m)", elevationChange);
     }
     
     // ✅ sessionMaxSpeed는 speed와 동일하게 원본 GPS speed 사용 (필터 없이)
