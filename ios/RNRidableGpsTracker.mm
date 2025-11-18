@@ -166,7 +166,7 @@ RCT_EXPORT_MODULE()
         _variance = 0.0;
         _processNoise = 0.0;
         _altitudeVariance = 0.0;
-        _altitudeProcessNoise = 3.0;
+        _altitudeProcessNoise = 6.0;
         _maxBufferSize = 10;
         _accelerometerBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];
         _gyroscopeBuffer = [NSMutableArray arrayWithCapacity:_maxBufferSize];

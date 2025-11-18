@@ -97,7 +97,7 @@ class LocationService : Service(), SensorEventListener {
     private var kalmanAltitude: Double = 0.0
     private var altitudeVariance: Double = 0.0
     private var isAltitudeKalmanInitialized = false
-    private var altitudeProcessNoise: Double = 3.0
+    private var altitudeProcessNoise: Double = 6.0
     
     // 운동 타입별 필터 파라미터
     private var processNoise: Double = 0.0
